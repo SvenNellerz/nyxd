@@ -1,3 +1,5 @@
+//go:build linux
+
 // Package native implements container networking entirely in Go.
 // Zero external CNI binaries. Zero external dependencies beyond golang.org/x/sys.
 //
@@ -40,6 +42,10 @@ const (
 	// NetNSDir is where bind-mounted network namespaces are stored.
 	NetNSDir = "/run/nyxd/netns"
 )
+
+// vethInfoPeer is the netlink nested attribute type for the veth peer spec
+// (linux/if_link.h: VETH_INFO_PEER).
+const vethInfoPeer = 1
 
 // PortMapping is a host→container port forward rule.
 type PortMapping struct {
@@ -212,7 +218,7 @@ func createVethPair(host, peer string, log *slog.Logger) error {
 	linkinfo := newNestedAttr(unix.IFLA_LINKINFO)
 	linkinfo.addAttrString(unix.IFLA_INFO_KIND, "veth")
 	infoData := newNestedAttr(unix.IFLA_INFO_DATA)
-	peerInfo := newNestedAttr(unix.VETH_INFO_PEER)
+	peerInfo := newNestedAttr(vethInfoPeer)
 	peerIfinfo := unix.IfInfomsg{Family: unix.AF_UNSPEC}
 	peerInfo.addBytes((*[unix.SizeofIfInfomsg]byte)(unsafe.Pointer(&peerIfinfo))[:])
 	peerInfo.addAttrString(unix.IFLA_IFNAME, peer)
@@ -598,6 +604,32 @@ func (m *nlMsg) addNested(n *nestedAttr) {
 	m.buf = append(m.buf, n.serialize()...)
 }
 
+// netlinkMessage is one RTNETLINK datagram after the generic header.
+type netlinkMessage struct {
+	Header unix.NlMsghdr
+	Data   []byte
+}
+
+func parseNetlinkMessages(b []byte) ([]netlinkMessage, error) {
+	var out []netlinkMessage
+	off := 0
+	for off+unix.NLMSG_HDRLEN <= len(b) {
+		hdr := (*unix.NlMsghdr)(unsafe.Pointer(&b[off]))
+		msgLen := int(hdr.Len)
+		if msgLen < unix.NLMSG_HDRLEN || off+msgLen > len(b) {
+			return nil, fmt.Errorf("invalid netlink message length %d", msgLen)
+		}
+		data := append([]byte(nil), b[off+unix.NLMSG_HDRLEN:off+msgLen]...)
+		out = append(out, netlinkMessage{Header: *hdr, Data: data})
+		off += nlmsgAlign(msgLen)
+	}
+	return out, nil
+}
+
+func nlmsgAlign(l int) int {
+	return (l + unix.NLMSG_ALIGNTO - 1) &^ (unix.NLMSG_ALIGNTO - 1)
+}
+
 func netlinkDo(fd int, req *nlMsg) error {
 	// Fix up length field in header.
 	binary.NativeEndian.PutUint32(req.buf[:4], uint32(len(req.buf)))
@@ -612,12 +644,15 @@ func netlinkDo(fd int, req *nlMsg) error {
 		if err != nil {
 			return fmt.Errorf("nl recv: %w", err)
 		}
-		msgs, err := unix.ParseNetlinkMessage(rbuf[:n])
+		msgs, err := parseNetlinkMessages(rbuf[:n])
 		if err != nil {
 			return fmt.Errorf("nl parse: %w", err)
 		}
 		for _, msg := range msgs {
 			if msg.Header.Type == unix.NLMSG_ERROR {
+				if len(msg.Data) < 4 {
+					return fmt.Errorf("nl error: short ack")
+				}
 				errno := int32(binary.NativeEndian.Uint32(msg.Data[:4]))
 				if errno == 0 {
 					return nil // ACK

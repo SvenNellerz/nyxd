@@ -27,6 +27,26 @@ const (
 	layerBufSize       = 32 * 1024
 )
 
+// ParsedRef holds normalized components of an image reference.
+type ParsedRef struct {
+	Registry string
+	Repo     string
+	Tag      string
+	Digest   string
+}
+
+// ParseRef parses a container image reference (used by tests and callers).
+func ParseRef(input string) (ParsedRef, error) {
+	reg, repo, tag := parseRef(input)
+	pr := ParsedRef{Registry: reg, Repo: repo}
+	if strings.Contains(input, "@") {
+		pr.Digest = tag
+	} else {
+		pr.Tag = tag
+	}
+	return pr, nil
+}
+
 // Store manages OCI blobs and image metadata on disk.
 //
 //	<storeRoot>/blobs/sha256/<hex>          – raw compressed blobs
@@ -92,6 +112,19 @@ func (s *Store) Pull(ctx context.Context, ref string) (*oci.ImageConfig, error) 
 func (s *Store) BlobPath(digest string) string {
 	hex := strings.TrimPrefix(digest, "sha256:")
 	return filepath.Join(s.root, "blobs", "sha256", hex)
+}
+
+// LoadManifest reads an OCI image manifest JSON from the blob store.
+func (s *Store) LoadManifest(digest string) (*oci.Manifest, error) {
+	data, err := os.ReadFile(s.BlobPath(digest))
+	if err != nil {
+		return nil, fmt.Errorf("read manifest blob: %w", err)
+	}
+	var m oci.Manifest
+	if err := json.Unmarshal(data, &m); err != nil {
+		return nil, fmt.Errorf("decode manifest: %w", err)
+	}
+	return &m, nil
 }
 
 // HasBlob returns true if the blob is already cached locally.

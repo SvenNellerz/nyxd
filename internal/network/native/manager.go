@@ -1,3 +1,5 @@
+//go:build linux
+
 // manager.go — drop-in replacement for the exec-based CNI Manager.
 // Implements the same interface as internal/network/cni.go but with
 // zero external binaries and zero CNI plugins on disk.

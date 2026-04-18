@@ -1,3 +1,5 @@
+//go:build linux
+
 // Package overlay manages overlayfs mounts for container rootfs.
 // Uses kernel overlayfs directly via syscall - no external tools needed.
 package overlay

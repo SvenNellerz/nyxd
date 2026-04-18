@@ -14,7 +14,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"syscall"
 )
 
 const (
@@ -136,7 +135,7 @@ func CreateNetNS(containerID string) (string, error) {
 // DeleteNetNS unmounts and removes a network namespace.
 func DeleteNetNS(containerID string) error {
 	nsPath := filepath.Join("/run/nyxd/netns", containerID)
-	syscall.Unmount(nsPath, syscall.MNT_DETACH) //nolint:errcheck
+	_ = detachUnmount(nsPath)
 	return os.Remove(nsPath)
 }
 

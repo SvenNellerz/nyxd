@@ -39,13 +39,13 @@ type RootFS struct {
 
 // Unpacker extracts OCI layers onto disk for overlayfs use.
 type Unpacker struct {
-	puller   *Puller
+	store    *Store
 	layerDir string // root directory for extracted layers
 }
 
-// NewUnpacker creates an Unpacker backed by the given Puller.
-func NewUnpacker(puller *Puller, layerDir string) *Unpacker {
-	return &Unpacker{puller: puller, layerDir: layerDir}
+// NewUnpacker creates an Unpacker backed by the image Store.
+func NewUnpacker(store *Store, layerDir string) *Unpacker {
+	return &Unpacker{store: store, layerDir: layerDir}
 }
 
 // UnpackResult contains paths needed to set up overlayfs.
@@ -61,7 +61,7 @@ type UnpackResult struct {
 // Unpack extracts all layers for the manifest at manifestDigest.
 // Returns the paths to the extracted layer directories.
 func (u *Unpacker) Unpack(manifestDigest string) (*UnpackResult, error) {
-	manifest, err := u.puller.LoadManifest(manifestDigest)
+	manifest, err := u.store.LoadManifest(manifestDigest)
 	if err != nil {
 		return nil, fmt.Errorf("load manifest: %w", err)
 	}
@@ -90,7 +90,7 @@ func (u *Unpacker) Unpack(manifestDigest string) (*UnpackResult, error) {
 }
 
 func (u *Unpacker) loadConfig(digest string) (*ImageConfig, error) {
-	data, err := os.ReadFile(u.puller.BlobPath(digest))
+	data, err := os.ReadFile(u.store.BlobPath(digest))
 	if err != nil {
 		return nil, err
 	}
@@ -118,7 +118,7 @@ func (u *Unpacker) unpackLayer(digest string, index int) (string, error) {
 
 	slog.Info("extracting layer", "index", index, "digest", digest)
 
-	blobPath := u.puller.BlobPath(digest)
+	blobPath := u.store.BlobPath(digest)
 	f, err := os.Open(blobPath)
 	if err != nil {
 		return "", fmt.Errorf("open blob: %w", err)
