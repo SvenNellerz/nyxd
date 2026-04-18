@@ -445,6 +445,6 @@ func applySeccomp(spec *ocispec.Spec, profilePath string) error {
 
 func baseSpec() *ocispec.Spec {
 	return &ocispec.Spec{
-		Version: "1.2.0",
+		Version: "1.3.0",
 	}
 }

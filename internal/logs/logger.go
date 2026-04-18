@@ -1,7 +1,7 @@
 // Package log provides structured container log streaming.
 // Attaches to crun's log-format=json output and forwards to the daemon log.
 // No goroutine leaks: all goroutines are tied to a context.
-package log
+package logs
 
 import (
 	"bufio"

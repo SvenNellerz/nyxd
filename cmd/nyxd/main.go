@@ -3,7 +3,6 @@
 package main
 
 import (
-	"time"
 	"context"
 	"flag"
 	"fmt"
@@ -11,13 +10,14 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
-	"github.com/cerberusos/nyxd/internal/image"
-	"github.com/cerberusos/nyxd/internal/log"
-	"github.com/cerberusos/nyxd/internal/network"
-	"github.com/cerberusos/nyxd/internal/overlay"
-	"github.com/cerberusos/nyxd/internal/runtime"
-	"github.com/cerberusos/nyxd/internal/supervisor"
+	"github.com/zrougamed/nyxd/internal/image"
+	"github.com/zrougamed/nyxd/internal/log"
+	"github.com/zrougamed/nyxd/internal/network"
+	"github.com/zrougamed/nyxd/internal/overlay"
+	"github.com/zrougamed/nyxd/internal/runtime"
+	"github.com/zrougamed/nyxd/internal/supervisor"
 )
 
 // Build-time variables injected via -ldflags.
@@ -29,13 +29,13 @@ var (
 
 // Config holds daemon configuration.
 type Config struct {
-	BaseDir    string
-	CrunBin    string
-	CNIBinDir  string
-	CNIConfDir string
+	BaseDir     string
+	CrunBin     string
+	CNIBinDir   string
+	CNIConfDir  string
 	NetworkName string
-	LogLevel   string
-	Version    bool
+	LogLevel    string
+	Version     bool
 }
 
 func main() {
