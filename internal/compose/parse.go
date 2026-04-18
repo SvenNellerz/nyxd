@@ -1,206 +1,155 @@
-// Package compose parses a minimal nyx-compose.yaml file.
-// Subset of compose-spec - only what nyxd needs.
-// No YAML library dep: uses encoding/json via a YAML-to-JSON shim approach.
-// Actually: we accept the single dep of gopkg.in/yaml.v3 since it's tiny
-// and widely audited. Everything else is stdlib.
+// Package compose parses a minimal nyx-compose.yaml into a typed Stack.
 package compose
 
 import (
 	"fmt"
-	"os"
+	"sort"
 	"strings"
 
-	"github.com/zrougamed/nyxd/internal/bundle"
-	"github.com/zrougamed/nyxd/internal/network"
-	"github.com/zrougamed/nyxd/internal/supervisor"
+	"gopkg.in/yaml.v3"
 )
 
-// File represents a nyx-compose.yaml.
-type File struct {
-	Version  string                   `yaml:"version"`
-	Services map[string]ServiceConfig `yaml:"services"`
-}
-
-// ServiceConfig is a single service definition.
-type ServiceConfig struct {
-	Image       string            `yaml:"image"`
-	Command     []string          `yaml:"command"`
-	Entrypoint  []string          `yaml:"entrypoint"`
-	Environment []string          `yaml:"environment"`
-	Ports       []string          `yaml:"ports"` // "host:container[/proto]"
-	WorkingDir  string            `yaml:"working_dir"`
-	User        string            `yaml:"user"`
-	ReadOnly    bool              `yaml:"read_only"`
-	Hostname    string            `yaml:"hostname"`
-	Restart     string            `yaml:"restart"` // always|on-failure|unless-stopped|no
-	Labels      map[string]string `yaml:"labels"`
-	Deploy      *DeployConfig     `yaml:"deploy"`
-	Healthcheck *HealthConfig     `yaml:"healthcheck"`
-	DependsOn   []string          `yaml:"depends_on"`
-}
-
-// DeployConfig maps to resource constraints.
-type DeployConfig struct {
-	Resources ResourcesConfig `yaml:"resources"`
-}
-
-type ResourcesConfig struct {
-	Limits LimitConfig `yaml:"limits"`
-}
-
-type LimitConfig struct {
-	CPUs   string `yaml:"cpus"`   // "0.5"
-	Memory string `yaml:"memory"` // "128m"
-	Pids   int64  `yaml:"pids"`
-}
-
-// HealthConfig matches Docker compose healthcheck.
-type HealthConfig struct {
-	Test        []string `yaml:"test"`
-	Interval    string   `yaml:"interval"`
-	Timeout     string   `yaml:"timeout"`
-	Retries     int      `yaml:"retries"`
-	StartPeriod string   `yaml:"start_period"`
-}
-
-// Parse reads and parses a nyx-compose.yaml file.
-// Uses a minimal hand-rolled YAML parser for zero deps.
-func Parse(path string) (*File, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("read compose file: %w", err)
+// Parse decodes compose YAML from bytes and validates the stack.
+func Parse(data []byte) (*Stack, error) {
+	var st Stack
+	if err := yaml.Unmarshal(data, &st); err != nil {
+		return nil, fmt.Errorf("compose yaml: %w", err)
 	}
-	return parseYAML(data)
-}
 
-// ToSpecs converts a compose File into supervisor ContainerSpecs.
-// blobPathsFn resolves image ref → ordered blob paths (from image store).
-func (f *File) ToSpecs(blobPathsFn func(ref string) ([]string, error)) ([]supervisor.ContainerSpec, error) {
-	specs := make([]supervisor.ContainerSpec, 0, len(f.Services))
-
-	for name, svc := range f.Services {
-		blobPaths, err := blobPathsFn(svc.Image)
-		if err != nil {
-			return nil, fmt.Errorf("service %s: %w", name, err)
-		}
-
-		ports, err := parsePorts(svc.Ports)
-		if err != nil {
-			return nil, fmt.Errorf("service %s ports: %w", name, err)
-		}
-
-		restart := toRestartPolicy(svc.Restart)
-
-		var resources *bundle.Resources
-		if svc.Deploy != nil {
-			resources = toResources(svc.Deploy)
-		}
-
-		spec := supervisor.ContainerSpec{
-			ID:            name,
-			Image:         svc.Image,
-			BlobPaths:     blobPaths,
-			Env:           svc.Environment,
-			Args:          svc.Command,
-			WorkDir:       svc.WorkingDir,
-			ReadOnly:      svc.ReadOnly,
-			Hostname:      svc.Hostname,
-			PortMappings:  ports,
-			RestartPolicy: restart,
-			Resources:     resources,
-		}
-		specs = append(specs, spec)
-	}
-	return specs, nil
-}
-
-// ─── Helpers ──────────────────────────────────────────────────────────────────
-
-func toRestartPolicy(s string) supervisor.RestartPolicy {
-	switch strings.ToLower(s) {
-	case "always":
-		return supervisor.RestartAlways
-	case "on-failure":
-		return supervisor.RestartOnFailure
-	case "unless-stopped":
-		return supervisor.RestartUnlessStopped
-	default:
-		return supervisor.RestartNever
-	}
-}
-
-func parsePorts(raw []string) ([]network.PortMapping, error) {
-	out := make([]network.PortMapping, 0, len(raw))
-	for _, p := range raw {
-		pm, err := parsePort(p)
-		if err != nil {
+	for name, svc := range st.Services {
+		if err := validateService(name, &svc, st.Services); err != nil {
 			return nil, err
 		}
-		out = append(out, pm)
+		st.Services[name] = svc
 	}
-	return out, nil
+
+	if err := detectCycles(st.Services); err != nil {
+		return nil, err
+	}
+
+	return &st, nil
 }
 
-func parsePort(s string) (network.PortMapping, error) {
-	// Format: [host:]container[/proto]
-	proto := "tcp"
-	if idx := strings.LastIndex(s, "/"); idx != -1 {
-		proto = s[idx+1:]
-		s = s[:idx]
+func validateService(name string, svc *Service, all map[string]Service) error {
+	if strings.TrimSpace(svc.Image) == "" {
+		return fmt.Errorf("service %q: missing image", name)
 	}
-
-	var hostPort, containerPort int
-	if idx := strings.Index(s, ":"); idx != -1 {
-		fmt.Sscan(s[:idx], &hostPort)
-		fmt.Sscan(s[idx+1:], &containerPort)
-	} else {
-		fmt.Sscan(s, &containerPort)
-		hostPort = containerPort
+	if err := validateRestart(svc.Restart); err != nil {
+		return fmt.Errorf("service %q: %w", name, err)
 	}
-
-	if containerPort == 0 {
-		return network.PortMapping{}, fmt.Errorf("invalid port: %s", s)
+	for _, dep := range svc.DependsOn {
+		if _, ok := all[dep]; !ok {
+			return fmt.Errorf("service %q: unknown depends_on %q", name, dep)
+		}
 	}
-	return network.PortMapping{HostPort: hostPort, ContainerPort: containerPort, Protocol: proto}, nil
+	if svc.NoNewPrivileges == nil {
+		t := true
+		svc.NoNewPrivileges = &t
+	}
+	return nil
 }
 
-func toResources(d *DeployConfig) *bundle.Resources {
-	r := &bundle.Resources{}
-	lim := d.Resources.Limits
-
-	if lim.Memory != "" {
-		r.Memory = &bundle.MemoryRes{Limit: parseMemory(lim.Memory)}
+func validateRestart(r RestartPolicy) error {
+	switch strings.ToLower(string(r)) {
+	case "", string(RestartNo), string(RestartAlways), string(RestartOnFailure), string(RestartUnlessStopped):
+		return nil
+	default:
+		return fmt.Errorf("invalid restart policy %q", r)
 	}
-	if lim.Pids > 0 {
-		r.Pids = &bundle.PidsRes{Limit: lim.Pids}
-	}
-	return r
 }
 
-// parseMemory parses "128m", "1g", "512k" into bytes.
-func parseMemory(s string) int64 {
-	s = strings.ToLower(strings.TrimSpace(s))
-	var val int64
-	var unit string
-	fmt.Sscanf(s, "%d%s", &val, &unit)
-	switch unit {
-	case "k", "kb":
-		return val * 1024
-	case "m", "mb":
-		return val * 1024 * 1024
-	case "g", "gb":
-		return val * 1024 * 1024 * 1024
+func detectCycles(services map[string]Service) error {
+	color := make(map[string]int8)
+
+	var dfs func(string) error
+	dfs = func(n string) error {
+		switch color[n] {
+		case 1:
+			return fmt.Errorf("dependency cycle detected")
+		case 2:
+			return nil
+		}
+		color[n] = 1
+		for _, dep := range services[n].DependsOn {
+			if err := dfs(dep); err != nil {
+				return err
+			}
+		}
+		color[n] = 2
+		return nil
 	}
-	return val
+
+	names := make([]string, 0, len(services))
+	for n := range services {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	for _, n := range names {
+		if color[n] == 0 {
+			if err := dfs(n); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
-// parseYAML is a minimal hand-rolled YAML parser for our compose subset.
-// Handles: key: value, key: [list], nested maps, multi-line lists with - prefix.
-// For production, swap this with gopkg.in/yaml.v3 (single dep, security-audited).
-func parseYAML(data []byte) (*File, error) {
-	// NOTE: This is a stub. In production, use gopkg.in/yaml.v3.
-	// The stub is here so the package compiles with zero external deps.
-	// To enable real YAML parsing, add the import and call yaml.Unmarshal.
-	_ = data
-	return nil, fmt.Errorf("parseYAML: replace with gopkg.in/yaml.v3 for production use")
+// TopologicalOrder returns service names in dependency order (dependencies first).
+func TopologicalOrder(stack *Stack) []string {
+	inDeg := make(map[string]int, len(stack.Services))
+	adj := make(map[string][]string)
+
+	for name := range stack.Services {
+		inDeg[name] = 0
+	}
+	for name, svc := range stack.Services {
+		inDeg[name] = len(svc.DependsOn)
+		for _, dep := range svc.DependsOn {
+			adj[dep] = append(adj[dep], name)
+		}
+	}
+
+	var roots []string
+	for name := range stack.Services {
+		if inDeg[name] == 0 {
+			roots = append(roots, name)
+		}
+	}
+	sort.Strings(roots)
+
+	q := roots
+	out := make([]string, 0, len(stack.Services))
+	for len(q) > 0 {
+		n := q[0]
+		q = q[1:]
+		out = append(out, n)
+
+		var unlocked []string
+		for _, m := range adj[n] {
+			inDeg[m]--
+			if inDeg[m] == 0 {
+				unlocked = append(unlocked, m)
+			}
+		}
+		sort.Strings(unlocked)
+		q = append(q, unlocked...)
+	}
+
+	if len(out) < len(stack.Services) {
+		// Should not happen if Parse succeeded; append remaining deterministically.
+		seen := make(map[string]bool, len(out))
+		for _, n := range out {
+			seen[n] = true
+		}
+		rest := make([]string, 0)
+		for n := range stack.Services {
+			if !seen[n] {
+				rest = append(rest, n)
+			}
+		}
+		sort.Strings(rest)
+		out = append(out, rest...)
+	}
+
+	return out
 }

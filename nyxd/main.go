@@ -13,7 +13,7 @@ import (
 	"time"
 
 	"github.com/zrougamed/nyxd/internal/image"
-	"github.com/zrougamed/nyxd/internal/log"
+	"github.com/zrougamed/nyxd/internal/logs"
 	"github.com/zrougamed/nyxd/internal/network"
 	"github.com/zrougamed/nyxd/internal/overlay"
 	"github.com/zrougamed/nyxd/internal/runtime"
@@ -91,7 +91,7 @@ func run(ctx context.Context, cfg Config, logger *slog.Logger) error {
 	}
 
 	// ── Log collector ──────────────────────────────────────────────────────────
-	_, err = log.NewCollector(cfg.BaseDir+"/logs", logger)
+	_, err = logs.NewCollector(cfg.BaseDir+"/logs", logger)
 	if err != nil {
 		return fmt.Errorf("log collector: %w", err)
 	}
