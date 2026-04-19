@@ -69,8 +69,26 @@ func NewStore(root string) (*Store, error) {
 // Pull fetches an image from a registry and caches blobs locally.
 // ref format: [registry/]name[:tag|@digest]
 func (s *Store) Pull(ctx context.Context, ref string) (*oci.ImageConfig, error) {
+	return s.PullWithProgress(ctx, ref, nil)
+}
+
+// PullWithProgress runs Pull and invokes on for each PullEvent (e.g. NDJSON streaming).
+// on must be non-blocking or very fast; the caller serializes if needed.
+func (s *Store) PullWithProgress(ctx context.Context, ref string, on func(PullEvent)) (*oci.ImageConfig, error) {
 	ctx, cancel := context.WithTimeout(ctx, pullTimeout)
 	defer cancel()
+
+	var emitMu sync.Mutex
+	emit := func(ev PullEvent) {
+		if on == nil {
+			return
+		}
+		emitMu.Lock()
+		defer emitMu.Unlock()
+		on(ev)
+	}
+
+	emit(PullEvent{Phase: "begin", Ref: ref})
 
 	reg, repo, tag := parseRef(ref)
 	client := &registryClient{
@@ -83,12 +101,29 @@ func (s *Store) Pull(ctx context.Context, ref string) (*oci.ImageConfig, error) 
 		return nil, fmt.Errorf("pull auth %s: %w", ref, err)
 	}
 
+	emit(PullEvent{Phase: "auth", Ref: ref, Message: "ok"})
+
 	manifest, err := client.manifest(ctx, tag)
 	if err != nil {
 		return nil, fmt.Errorf("pull manifest %s: %w", ref, err)
 	}
 
-	cfgBlob, err := s.fetchBlob(ctx, client, manifest.Config)
+	emit(PullEvent{
+		Phase:      "manifest",
+		Ref:        ref,
+		MediaType:  manifest.MediaType,
+		LayerCount: len(manifest.Layers),
+	})
+
+	emit(PullEvent{
+		Phase:  "config",
+		Digest: manifest.Config.Digest,
+		Size:   manifest.Config.Size,
+	})
+
+	cfgBlob, err := s.fetchBlob(ctx, client, manifest.Config, func(cur int64) {
+		emit(PullEvent{Phase: "progress", Digest: manifest.Config.Digest, Current: cur})
+	})
 	if err != nil {
 		return nil, fmt.Errorf("pull config: %w", err)
 	}
@@ -97,9 +132,13 @@ func (s *Store) Pull(ctx context.Context, ref string) (*oci.ImageConfig, error) 
 		return nil, fmt.Errorf("decode image config: %w", err)
 	}
 
-	if err := s.pullLayers(ctx, client, manifest.Layers); err != nil {
+	emit(PullEvent{Phase: "layer_done", Digest: manifest.Config.Digest})
+
+	if err := s.pullLayers(ctx, client, manifest.Layers, emit); err != nil {
 		return nil, fmt.Errorf("pull layers: %w", err)
 	}
+
+	emit(PullEvent{Phase: "meta", Ref: ref, Message: "writing image metadata"})
 
 	if err := s.writeImageMeta(ref, manifest, &imgCfg); err != nil {
 		return nil, fmt.Errorf("write image meta: %w", err)
@@ -177,14 +216,24 @@ func (s *Store) ResolvePulledImage(ref string) (*oci.Manifest, *oci.ImageConfig,
 }
 
 // pullLayers fetches all layers with bounded concurrency.
-func (s *Store) pullLayers(ctx context.Context, client *registryClient, layers []oci.Descriptor) error {
+func (s *Store) pullLayers(ctx context.Context, client *registryClient, layers []oci.Descriptor, emit func(PullEvent)) error {
 	type result struct{ err error }
 	results := make(chan result, len(layers))
 	sem := make(chan struct{}, maxLayerConcurrent)
 
 	var wg sync.WaitGroup
-	for _, layer := range layers {
-		if s.HasBlob(layer.Digest) {
+	for i, layer := range layers {
+		cached := s.HasBlob(layer.Digest)
+		emit(PullEvent{
+			Phase:   "layer",
+			Index:   i,
+			Count:   len(layers),
+			Digest:  layer.Digest,
+			Size:    layer.Size,
+			Cached:  cached,
+		})
+		if cached {
+			emit(PullEvent{Phase: "layer_done", Digest: layer.Digest})
 			continue
 		}
 		wg.Add(1)
@@ -192,7 +241,12 @@ func (s *Store) pullLayers(ctx context.Context, client *registryClient, layers [
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			err := s.fetchBlobToDisk(ctx, client, desc)
+			err := s.fetchBlobToDisk(ctx, client, desc, func(cur int64) {
+				emit(PullEvent{Phase: "progress", Digest: desc.Digest, Current: cur})
+			})
+			if err == nil {
+				emit(PullEvent{Phase: "layer_done", Digest: desc.Digest})
+			}
 			results <- result{err}
 		}(layer)
 	}
@@ -211,24 +265,67 @@ func (s *Store) pullLayers(ctx context.Context, client *registryClient, layers [
 	return errors.Join(errs...)
 }
 
+// progressReader wraps an io.Reader to emit absolute byte counts periodically.
+type progressReader struct {
+	r    io.Reader
+	step int64
+	next int64
+	n    int64
+	fn   func(int64)
+}
+
+func newProgressReader(r io.Reader, fn func(int64)) io.Reader {
+	if fn == nil {
+		return r
+	}
+	const step = 256 * 1024
+	if step < 1 {
+		return r
+	}
+	return &progressReader{r: r, step: step, next: step, fn: fn}
+}
+
+func (p *progressReader) Read(b []byte) (int, error) {
+	n, err := p.r.Read(b)
+	if n > 0 {
+		p.n += int64(n)
+		if p.fn != nil && p.n >= p.next {
+			p.fn(p.n)
+			for p.next <= p.n {
+				p.next += p.step
+			}
+		}
+	}
+	if err == io.EOF && p.fn != nil {
+		p.fn(p.n)
+	}
+	return n, err
+}
+
 // fetchBlob downloads a small blob (e.g. config) and returns its bytes.
-func (s *Store) fetchBlob(ctx context.Context, client *registryClient, desc oci.Descriptor) ([]byte, error) {
+func (s *Store) fetchBlob(ctx context.Context, client *registryClient, desc oci.Descriptor, onProgress func(int64)) ([]byte, error) {
 	dest := s.BlobPath(desc.Digest)
 
 	if data, err := os.ReadFile(dest); err == nil {
+		if onProgress != nil {
+			onProgress(int64(len(data)))
+		}
 		return data, nil
 	}
 
-	if err := s.fetchBlobToDisk(ctx, client, desc); err != nil {
+	if err := s.fetchBlobToDisk(ctx, client, desc, onProgress); err != nil {
 		return nil, err
 	}
 	return os.ReadFile(dest)
 }
 
 // fetchBlobToDisk streams a blob to the content store without holding the full payload in memory.
-func (s *Store) fetchBlobToDisk(ctx context.Context, client *registryClient, desc oci.Descriptor) error {
+func (s *Store) fetchBlobToDisk(ctx context.Context, client *registryClient, desc oci.Descriptor, onProgress func(int64)) error {
 	dest := s.BlobPath(desc.Digest)
-	if _, err := os.Stat(dest); err == nil {
+	if st, err := os.Stat(dest); err == nil {
+		if onProgress != nil {
+			onProgress(st.Size())
+		}
 		return nil
 	}
 
@@ -250,7 +347,8 @@ func (s *Store) fetchBlobToDisk(ctx context.Context, client *registryClient, des
 	}
 
 	h := sha256.New()
-	tee := io.TeeReader(rc, h)
+	pr := newProgressReader(rc, onProgress)
+	tee := io.TeeReader(pr, h)
 	buf := make([]byte, layerBufSize)
 
 	if _, err := io.CopyBuffer(tmp, tee, buf); err != nil {

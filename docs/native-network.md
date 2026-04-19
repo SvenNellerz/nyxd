@@ -88,21 +88,28 @@ table ip nyxd-nat {
 }
 ```
 
-## Switching from exec CNI to native
+## Switching between native and exec CNI
 
-In `cmd/nyxd/main.go`, change:
+**Default (nyxd ≥ current):** `nyxd` uses **`-net-driver=native`** — in-process bridge/veth/IPAM
+(`internal/network/native`). No `bridge` / `host-local` binaries under `/opt/cni/bin`.
 
-```go
-// Before (exec-based CNI)
-import "github.com/zrougamed/nyxd/internal/network"
-net := network.NewManager("nyx", cfg.CNIConfDir, cfg.CNIBinDir)
+To use standard CNI plugins instead:
 
-// After (native, zero external binaries)
-import "github.com/zrougamed/nyxd/internal/network/native"
-net := native.NewManager(logger)
+```text
+nyxd --net-driver=cni --cni-bin-dir=/opt/cni/bin --cni-conf-dir=/etc/cni/net.d --network=nyx
 ```
 
-The supervisor calls `net.Setup()` and `net.Teardown()` — same signatures.
+In code, both backends implement `network.Backend` and are passed to `supervisor.New`:
+
+```go
+// Native (default CLI flag)
+import "github.com/zrougamed/nyxd/internal/network/native"
+net := native.NewManager(logger)
+
+// Exec-based CNI plugins
+import "github.com/zrougamed/nyxd/internal/network"
+net := network.NewManager("nyx", cfg.CNIConfDir, cfg.CNIBinDir)
+```
 
 ## Kernel modules required by the native plugin
 

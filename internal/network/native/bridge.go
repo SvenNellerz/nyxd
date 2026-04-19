@@ -29,6 +29,8 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/zrougamed/nyxd/internal/network"
+
 	"golang.org/x/sys/unix"
 )
 
@@ -49,13 +51,6 @@ const (
 // (linux/if_link.h: VETH_INFO_PEER).
 const vethInfoPeer = 1
 
-// PortMapping is a host→container port forward rule.
-type PortMapping struct {
-	HostPort      uint16
-	ContainerPort uint16
-	Protocol      string // "tcp" or "udp"
-}
-
 // Setup configures networking for a new container:
 //  1. Ensures nyxbr0 exists and is up
 //  2. Allocates an IP from the subnet
@@ -64,7 +59,7 @@ type PortMapping struct {
 //  5. Adds nftables DNAT rules for any port mappings
 //
 // Returns the allocated container IP.
-func Setup(ctx context.Context, containerID, netNSPath string, ports []PortMapping, log *slog.Logger) (string, error) {
+func Setup(ctx context.Context, containerID, netNSPath string, ports []network.PortMapping, log *slog.Logger) (string, error) {
 	// 1. Bridge
 	if err := ensureBridge(log); err != nil {
 		return "", fmt.Errorf("bridge: %w", err)
@@ -425,7 +420,7 @@ var portmapState sync.Map // containerID → []string (rule handles)
 // using nft via the nftables netlink API (no nft binary required).
 // For simplicity we shell out to nft here — pure netlink nftables is 1000+ lines.
 // The nft binary is tiny (part of nftables package) and has no CVE history.
-func addPortMappings(containerID, containerIP string, ports []PortMapping, log *slog.Logger) error {
+func addPortMappings(containerID, containerIP string, ports []network.PortMapping, log *slog.Logger) error {
 	for _, p := range ports {
 		proto := p.Protocol
 		if proto == "" {

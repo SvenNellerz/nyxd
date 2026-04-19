@@ -10,9 +10,7 @@ Type=notify
 ExecStart=/usr/local/bin/nyxd \
     --base-dir=/var/lib/nyxd \
     --crun=/usr/bin/crun \
-    --cni-bin-dir=/opt/cni/bin \
-    --cni-conf-dir=/etc/cni/net.d \
-    --network=nyx \
+    --net-driver=native \
     --log-level=info
 
 Restart=on-failure
@@ -23,7 +21,7 @@ NoNewPrivileges=no          # must be no - containers need privilege setup
 PrivateNetwork=no           # nyxd manages the network
 ProtectKernelTunables=no    # overlayfs needs kernel params
 ProtectControlGroups=no     # cgroup management
-ReadWritePaths=/var/lib/nyxd /run/nyxd /etc/cni /sys/fs/cgroup
+ReadWritePaths=/var/lib/nyxd /run/nyxd /sys/fs/cgroup
 
 # Resource limits for the daemon itself
 MemoryMax=256M

@@ -172,7 +172,8 @@ func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
 }
 
 type pullRequest struct {
-	Ref string `json:"ref"`
+	Ref    string `json:"ref"`
+	Stream bool   `json:"stream,omitempty"`
 }
 
 func (s *Server) handleImagePull(w http.ResponseWriter, r *http.Request) {
@@ -189,24 +190,61 @@ func (s *Server) handleImagePull(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "missing ref", http.StatusBadRequest)
 		return
 	}
-	cfg, err := s.store.Pull(r.Context(), body.Ref)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadGateway)
+
+	if !body.Stream {
+		cfg, err := s.store.PullWithProgress(r.Context(), body.Ref, nil)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"ok":  true,
+			"ref": body.Ref,
+			"config": map[string]any{
+				"os":             cfg.OS,
+				"architecture":   cfg.Architecture,
+				"entrypoint":     cfg.Config.Entrypoint,
+				"cmd":            cfg.Config.Cmd,
+				"working_dir":    cfg.Config.WorkingDir,
+				"env_len":        len(cfg.Config.Env),
+			},
+		})
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]any{
-		"ok":  true,
-		"ref": body.Ref,
-		"config": map[string]any{
-			"os":             cfg.OS,
-			"architecture":   cfg.Architecture,
-			"entrypoint":     cfg.Config.Entrypoint,
-			"cmd":            cfg.Config.Cmd,
-			"working_dir":    cfg.Config.WorkingDir,
-			"env_len":        len(cfg.Config.Env),
-		},
+
+	w.Header().Set("Content-Type", "application/x-ndjson")
+	w.WriteHeader(http.StatusOK)
+	fl, ok := w.(http.Flusher)
+	enc := json.NewEncoder(w)
+	emit := func(ev image.PullEvent) {
+		if err := enc.Encode(ev); err != nil {
+			s.log.Warn("pull stream encode", "err", err)
+			return
+		}
+		if ok {
+			fl.Flush()
+		}
+	}
+
+	cfg, err := s.store.PullWithProgress(r.Context(), body.Ref, emit)
+	if err != nil {
+		_ = enc.Encode(image.PullEvent{Phase: "error", Message: err.Error()})
+		if ok {
+			fl.Flush()
+		}
+		return
+	}
+
+	_ = enc.Encode(image.PullEvent{
+		Phase:  "done",
+		OK:     true,
+		RefOut: body.Ref,
+		Config: image.SummaryFromConfig(cfg),
 	})
+	if ok {
+		fl.Flush()
+	}
 }
 
 type runRequest struct {

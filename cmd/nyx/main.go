@@ -56,10 +56,11 @@ func run(args []string) error {
 	case "version":
 		return doVersion(socket)
 	case "pull":
-		if len(args) < 2 {
-			return fmt.Errorf("usage: nyx pull <ref>")
+		ref, jsonOut, err := parsePullArgs(args[1:])
+		if err != nil {
+			return err
 		}
-		return doPull(socket, args[1])
+		return doPull(socket, ref, jsonOut)
 	case "run":
 		return doRun(socket, args[1:])
 	case "exec":
@@ -75,7 +76,7 @@ func usage() {
 Commands:
   ping              GET /v1/ping
   version           GET /v1/version
-  pull <ref>        POST /v1/images/pull
+  pull [--json] <ref>   streamed progress + summary (use --json for raw JSON)
   run [--name ID] <image> [-- <argv...>]   POST /v1/containers/run
   exec <id> [--] <argv...>   POST /v1/containers/{id}/exec
 
@@ -128,30 +129,6 @@ func doVersion(socket string) error {
 	}
 	_, err = io.Copy(os.Stdout, resp.Body)
 	return err
-}
-
-func doPull(socket, ref string) error {
-	c := httpClient(socket)
-	body, _ := json.Marshal(map[string]string{"ref": ref})
-	req, err := http.NewRequest(http.MethodPost, "http://unix/v1/images/pull", bytes.NewReader(body))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := c.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	b, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("pull: %s: %s", resp.Status, bytes.TrimSpace(b))
-	}
-	os.Stdout.Write(b)
-	if len(b) > 0 && b[len(b)-1] != '\n' {
-		fmt.Println()
-	}
-	return nil
 }
 
 func parseRunArgs(args []string) (name, image string, cmdArgs []string, err error) {

@@ -1,5 +1,5 @@
 // nyxd - minimal OCI container orchestrator for NyxOS.
-// No Docker, no Podman, no containerd. Just crun + CNI + Go.
+// No Docker, no Podman, no containerd. Just crun + networking + Go.
 package main
 
 import (
@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -16,6 +17,7 @@ import (
 	"github.com/zrougamed/nyxd/internal/image"
 	"github.com/zrougamed/nyxd/internal/logs"
 	"github.com/zrougamed/nyxd/internal/network"
+	"github.com/zrougamed/nyxd/internal/network/native"
 	"github.com/zrougamed/nyxd/internal/overlay"
 	"github.com/zrougamed/nyxd/internal/runtime"
 	"github.com/zrougamed/nyxd/internal/supervisor"
@@ -32,6 +34,7 @@ var (
 type Config struct {
 	BaseDir     string
 	CrunBin     string
+	NetDriver   string // "native" (default) or "cni"
 	CNIBinDir   string
 	CNIConfDir  string
 	NetworkName string
@@ -77,9 +80,20 @@ func run(ctx context.Context, cfg Config, logger *slog.Logger) error {
 		return fmt.Errorf("overlay: %w", err)
 	}
 
-	net := network.NewManager(cfg.NetworkName, cfg.CNIConfDir, cfg.CNIBinDir)
+	var net network.Backend
+	driver := strings.ToLower(strings.TrimSpace(cfg.NetDriver))
+	switch driver {
+	case "cni":
+		net = network.NewManager(cfg.NetworkName, cfg.CNIConfDir, cfg.CNIBinDir)
+	case "", "native":
+		driver = "native"
+		net = native.NewManager(logger)
+	default:
+		return fmt.Errorf("unknown -net-driver %q (use native or cni)", cfg.NetDriver)
+	}
+	logger.Info("network backend", "driver", driver)
 	if err := net.EnsureNetwork(); err != nil {
-		return fmt.Errorf("cni network setup: %w", err)
+		return fmt.Errorf("network setup: %w", err)
 	}
 
 	rt, err := runtime.New(cfg.CrunBin, cfg.BaseDir+"/run/crun")
@@ -123,9 +137,10 @@ func parseFlags() Config {
 	cfg := Config{}
 	flag.StringVar(&cfg.BaseDir, "base-dir", "/var/lib/nyxd", "Base data directory")
 	flag.StringVar(&cfg.CrunBin, "crun", "crun", "Path to crun binary")
-	flag.StringVar(&cfg.CNIBinDir, "cni-bin-dir", "/opt/cni/bin", "CNI plugin binaries directory")
-	flag.StringVar(&cfg.CNIConfDir, "cni-conf-dir", "/etc/cni/net.d", "CNI config directory")
-	flag.StringVar(&cfg.NetworkName, "network", "nyx", "CNI network name")
+	flag.StringVar(&cfg.NetDriver, "net-driver", "native", "Container networking: native (in-process, no CNI plugins) or cni (exec plugins under -cni-bin-dir)")
+	flag.StringVar(&cfg.CNIBinDir, "cni-bin-dir", "/opt/cni/bin", "CNI plugin binaries directory (only for -net-driver=cni)")
+	flag.StringVar(&cfg.CNIConfDir, "cni-conf-dir", "/etc/cni/net.d", "CNI config directory (only for -net-driver=cni)")
+	flag.StringVar(&cfg.NetworkName, "network", "nyx", "CNI network name (only for -net-driver=cni)")
 	flag.StringVar(&cfg.LogLevel, "log-level", "info", "Log level: debug|info|warn|error")
 	flag.StringVar(&cfg.Socket, "socket", "/run/nyxd/nyxd.sock", "Unix socket for HTTP control API (nyx client); set to \"\" to disable")
 	flag.BoolVar(&cfg.Version, "version", false, "Print version and exit")

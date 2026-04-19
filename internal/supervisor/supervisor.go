@@ -69,7 +69,7 @@ type containerEntry struct {
 type Supervisor struct {
 	rt      *runtime.Runtime
 	ovl     *overlay.Manager
-	net     *network.Manager
+	net     network.Backend
 	log     *slog.Logger
 	baseDir string // /var/lib/nyxd
 
@@ -79,7 +79,7 @@ type Supervisor struct {
 }
 
 // New creates a Supervisor.
-func New(rt *runtime.Runtime, ovl *overlay.Manager, net *network.Manager, baseDir string, log *slog.Logger) *Supervisor {
+func New(rt *runtime.Runtime, ovl *overlay.Manager, net network.Backend, baseDir string, log *slog.Logger) *Supervisor {
 	return &Supervisor{
 		rt:         rt,
 		ovl:        ovl,
@@ -216,7 +216,7 @@ func (s *Supervisor) startOnce(ctx context.Context, e *containerEntry) error {
 	}
 	e.rootFS = rootFS
 
-	// 2. Network namespace + CNI.
+	// 2. Network namespace + host networking (native or CNI plugins).
 	nsPath, err := network.CreateNetNS(spec.ID)
 	if err != nil {
 		s.ovl.Remove(spec.ID) //nolint:errcheck
@@ -228,7 +228,7 @@ func (s *Supervisor) startOnce(ctx context.Context, e *containerEntry) error {
 	if err != nil {
 		network.DeleteNetNS(spec.ID) //nolint:errcheck
 		s.ovl.Remove(spec.ID)        //nolint:errcheck
-		return fmt.Errorf("cni setup: %w", err)
+		return fmt.Errorf("network setup: %w", err)
 	}
 	e.ip = ip
 	log.Info("network assigned", "ip", ip)
@@ -352,7 +352,7 @@ func (s *Supervisor) shouldRestart(e *containerEntry, exitCode int) bool {
 func (s *Supervisor) teardownNetwork(ctx context.Context, id string) {
 	nsPath := fmt.Sprintf("/run/nyxd/netns/%s", id)
 	if err := s.net.Teardown(ctx, id, nsPath); err != nil {
-		s.log.Warn("cni teardown", "id", id, "err", err)
+		s.log.Warn("network teardown", "id", id, "err", err)
 	}
 	if err := network.DeleteNetNS(id); err != nil {
 		s.log.Warn("netns delete", "id", id, "err", err)

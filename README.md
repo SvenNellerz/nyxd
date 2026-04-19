@@ -4,7 +4,7 @@ Minimal OCI container orchestrator for NyxOS edge nodes.
 
 **Zero Docker. Zero Podman. Zero containerd.**
 
-Uses `crun` as the OCI runtime and CNI plugins for networking.
+Uses `crun` as the OCI runtime. **Default networking is in-process** (`internal/network/native`: bridge, veth, IPAM, nftables port maps). Optional **`-net-driver=cni`** uses standard CNI plugins from disk (`/opt/cni/bin`).
 
 ## Architecture
 
@@ -12,7 +12,8 @@ Uses `crun` as the OCI runtime and CNI plugins for networking.
 nyxd
 ├── image/        OCI image puller (raw HTTP, no registry SDK)
 ├── overlay/      overlayfs rootfs management (syscall direct)
-├── network/      CNI plugin executor (exec, no library)
+├── network/      Networking: native (default) or CNI plugin executor
+├── network/native/  In-process bridge + veth + IPAM (no /opt/cni/bin)
 ├── bundle/       OCI runtime-spec config.json generator
 ├── runtime/      crun CLI wrapper
 ├── supervisor/   restart policy + lifecycle management
@@ -26,7 +27,8 @@ nyxd
 | Dep | Why | CVE surface |
 |-----|-----|-------------|
 | `crun` | OCI runtime | Contained, rootless-capable |
-| CNI plugins | Network setup (bridge, portmap, firewall) | Static binaries |
+| CNI plugins | Only if you pass **`-net-driver=cni`** | Static binaries under `/opt/cni/bin` |
+| `nft` | Port NAT rules (native driver) | System `nft` binary |
 
 Go external modules: **2**
 - `github.com/opencontainers/image-spec` - OCI type definitions only
@@ -54,8 +56,8 @@ make build-arm64
 # Install crun
 make install-crun
 
-# Install CNI plugins (bridge, portmap, firewall, tuning)
-make install-cni
+# Optional: CNI plugins only when using -net-driver=cni
+# make install-cni
 
 # Install daemon
 make install
@@ -90,7 +92,7 @@ nyxd logs web --tail 50
 - `NoNewPrivileges=true` in every container spec
 - Minimal capability set (no CAP_SYS_ADMIN, no CAP_SYS_PTRACE)
 - `/proc`, `/sys` masked and read-only paths enforced
-- Network namespace per container (CNI bridge, ipmasq)
+- Network namespace per container (bridge + NAT; native driver by default)
 - overlayfs read-only lower layers
 - Digest verification on every pulled blob (sha256)
 - Atomic writes everywhere (write-to-tmp, rename)

@@ -15,7 +15,7 @@ Legend: `[x]` shipped in tree (still may need polish), `[ ]` not done, `[~]` par
 - [x] **Healthcheck library** — `internal/health`: exec (via `crun exec` + `CommandContext`), HTTP, TCP, retries, `onUnhealthy` callback hook (caller must wire policy).
 - [x] **Logs** — `internal/logs`: JSONL append per container, `Tail` (reads whole file — see gaps).
 - [x] **Telemetry types** — `internal/telemetry`: counters + optional Prometheus-ish HTTP handler (`ServeMetrics`) — **not called from daemon today**.
-- [x] **Daemon entry** — `cmd/nyxd`: wiring for store, overlay, CNI manager, runtime, log collector, supervisor; graceful shutdown context (30s); root check; **Unix socket HTTP control API** (`-socket`, default `/run/nyxd/nyxd.sock`); `go.sum` present after `go mod tidy`.
+- [x] **Daemon entry** — `cmd/nyxd`: wiring for store, overlay, **network backend** (`-net-driver`), runtime, log collector, supervisor; graceful shutdown context (30s); root check; **Unix socket HTTP control API** (`-socket`, default `/run/nyxd/nyxd.sock`); `go.sum` present after `go mod tidy`.
 - [x] **`nyx` CLI client** — `cmd/nyx`: `ping`, `version`, `pull`, `run`, `exec`; `make build-nyx` → `bin/nyx`.
 - [x] **Unit tests** — compose parser, image ref parsing, native IPAM (Linux build); no end-to-end integration tests.
 - [x] **Docs / packaging** — kernel requirements, native network notes, example service units (`Type=simple` in `packaging/nyxd.service`, `Type=notify` in repo `nyxd.service` without `sd_notify` yet).
@@ -157,12 +157,12 @@ Legend: `[x]` shipped in tree (still may need polish), `[ ]` not done, `[~]` par
 - [x] **Imports / build** — compiles; `go run ./cmd/nyxd` works.
 - [~] **Subcommands on `nyxd` itself** — still no `nyxd pull` subcommand; use **`nyx pull`** against the socket, or the HTTP API. *(See **API, clients & UI** for OpenAPI, SDK samples, and UI.)*
 - [x] **Control socket flag** — `-socket` (default `/run/nyxd/nyxd.sock`, `""` disables).
-- [ ] **Native network selection** — daemon always constructs **CNI** `network.Manager`; native manager not selectable via flag.
+- [x] **Native network selection** — `-net-driver` (default **`native`**: in-process `internal/network/native`); **`cni`** uses exec plugins under `-cni-bin-dir`.
 - [ ] **`systemd-notify`** — `nyxd.service` uses `Type=notify` but process never sends `READY=1` / reloading state; switch to `Type=simple` or implement sd_notify.
 
 **Done / partial**
 
-- [x] **Operational flags** — base dir, crun path, CNI paths, network name, log level, version, socket.
+- [x] **Operational flags** — base dir, crun path, **`-net-driver`** (native|cni), CNI paths (cni mode), network name (cni mode), log level, version, socket.
 
 ---
 
@@ -225,7 +225,7 @@ Legend: `[x]` shipped in tree (still may need polish), `[ ]` not done, `[~]` par
 
 3. **What you should see** — Daemon logs `daemon ready - awaiting workload` and `control API listening` when the socket bound. The process blocks until SIGINT/SIGTERM.
 
-4. **Running a workload** — After **`nyx pull <ref>`**, **`nyx run <ref>`** calls **`POST /v1/containers/run`** (default restart `unless-stopped`). The daemon resolves local image metadata + layer blobs, then **`supervisor.Start`** builds overlay, CNI, bundle, and **`crun run --detach`**. Use **`nyx exec <id> -- …`** against the returned `id` for one-off commands inside the container.
+4. **Running a workload** — After **`nyx pull <ref>`**, **`nyx run <ref>`** calls **`POST /v1/containers/run`** (default restart `unless-stopped`). The daemon resolves local image metadata + layer blobs, then **`supervisor.Start`** builds overlay, **networking** (default in-process native), bundle, and **`crun run --detach`**. Use **`nyx exec <id> -- …`** against the returned `id` for one-off commands inside the container.
 
 5. **Disable the socket** — `sudo ./bin/nyxd -socket="" …` if you do not want the control listener.
 

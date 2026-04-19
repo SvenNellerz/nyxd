@@ -10,6 +10,8 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+
+	"github.com/zrougamed/nyxd/internal/network"
 )
 
 // Manager is the native network manager for nyxd.
@@ -31,6 +33,8 @@ func NewManager(log *slog.Logger) *Manager {
 	}
 }
 
+var _ network.Backend = (*Manager)(nil)
+
 // EnsureNetwork creates the nyxbr0 bridge and nftables base rules
 // if they don't already exist. Safe to call multiple times.
 func (m *Manager) EnsureNetwork() error {
@@ -45,7 +49,7 @@ func (m *Manager) EnsureNetwork() error {
 
 // Setup configures networking for containerID in netNSPath.
 // Returns the container's allocated IP address.
-func (m *Manager) Setup(ctx context.Context, containerID, netNSPath string, ports []PortMapping) (string, error) {
+func (m *Manager) Setup(ctx context.Context, containerID, netNSPath string, ports []network.PortMapping) (string, error) {
 	ip, err := Setup(ctx, containerID, netNSPath, ports, m.log)
 	if err != nil {
 		return "", err

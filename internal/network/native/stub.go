@@ -8,14 +8,9 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
-)
 
-// PortMapping defines a host:container port mapping (same shape as internal/network).
-type PortMapping struct {
-	HostPort      int
-	ContainerPort int
-	Protocol      string
-}
+	"github.com/zrougamed/nyxd/internal/network"
+)
 
 // Manager is a stub on non-Linux platforms.
 type Manager struct {
@@ -34,7 +29,7 @@ func (m *Manager) EnsureNetwork() error {
 }
 
 // Setup is unsupported off Linux.
-func (m *Manager) Setup(ctx context.Context, containerID, netNSPath string, ports []PortMapping) (string, error) {
+func (m *Manager) Setup(ctx context.Context, containerID, netNSPath string, ports []network.PortMapping) (string, error) {
 	_, _, _, _ = ctx, containerID, netNSPath, ports
 	return "", fmt.Errorf("native network: supported only on linux")
 }
@@ -54,3 +49,5 @@ func (m *Manager) IP(containerID string) string {
 func (m *Manager) Allocations() map[string]string {
 	return map[string]string{}
 }
+
+var _ network.Backend = (*Manager)(nil)

@@ -301,3 +301,5 @@ func firstIP(cidr string) string {
 	ip[3]++ // .1
 	return ip.String()
 }
+
+var _ Backend = (*Manager)(nil)
