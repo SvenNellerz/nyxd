@@ -1,6 +1,8 @@
 # nyxd Makefile
 BINARY   := nyxd
+NYX      := nyx
 PACKAGE  := github.com/zrougamed/nyxd/cmd/nyxd
+NYX_PKG  := github.com/zrougamed/nyxd/cmd/nyx
 VERSION  := $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 COMMIT   := $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 DATE     := $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
@@ -9,12 +11,15 @@ LDFLAGS  := -w -s \
 	-X main.gitCommit=$(COMMIT) \
 	-X main.buildDate=$(DATE)
 
-.PHONY: all build lint vet clean install
+.PHONY: all build build-nyx lint vet clean install
 
-all: build
+all: build build-nyx
 
 build:
 	CGO_ENABLED=0 go build -trimpath -ldflags "$(LDFLAGS)" -o bin/$(BINARY) $(PACKAGE)
+
+build-nyx:
+	CGO_ENABLED=0 go build -trimpath -ldflags "$(LDFLAGS)" -o bin/$(NYX) $(NYX_PKG)
 
 # Static binary for edge nodes (no libc dependency)
 build-static:
@@ -39,8 +44,9 @@ test:
 clean:
 	rm -rf bin/
 
-install: build
+install: build build-nyx
 	install -m 755 bin/$(BINARY) /usr/local/bin/$(BINARY)
+	install -m 755 bin/$(NYX) /usr/local/bin/$(NYX)
 
 # Install crun from distro or build from source
 install-crun:

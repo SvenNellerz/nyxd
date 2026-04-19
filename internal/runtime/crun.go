@@ -7,9 +7,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -21,6 +23,8 @@ type State struct {
 	Pid         int    `json:"pid"`
 	Bundle      string `json:"bundle"`
 	Annotations map[string]string `json:"annotations,omitempty"`
+	// ExitCode is populated by some runtimes (e.g. crun) when status is stopped.
+	ExitCode *int `json:"exit_code,omitempty"`
 }
 
 // Runtime wraps crun/runc CLI.
@@ -148,21 +152,84 @@ func (r *Runtime) WaitForExit(ctx context.Context, containerID string) (int, err
 				return -1, nil
 			}
 			if s.Status == "stopped" {
-				return r.exitCode(containerID), nil
+				return r.resolveExitCode(ctx, containerID, s), nil
 			}
 		}
 	}
 }
 
-// exitCode reads the exit code from crun's state dir.
-func (r *Runtime) exitCode(containerID string) int {
-	data, err := os.ReadFile(filepath.Join(r.rootDir, containerID, "exit_code"))
-	if err != nil {
-		return -1
+func (r *Runtime) resolveExitCode(ctx context.Context, containerID string, s *State) int {
+	if s != nil && s.ExitCode != nil {
+		return *s.ExitCode
 	}
-	var code int
-	fmt.Sscan(strings.TrimSpace(string(data)), &code)
-	return code
+	if code, ok := exitCodeFromStateFile(filepath.Join(r.rootDir, containerID, "exit_code")); ok {
+		return code
+	}
+	// Re-fetch raw state for extensions not mapped on State (best-effort).
+	if code, ok := r.exitCodeFromRawState(ctx, containerID); ok {
+		return code
+	}
+	return -1
+}
+
+func exitCodeFromStateFile(path string) (int, bool) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return 0, false
+	}
+	code, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil {
+		return 0, false
+	}
+	return code, true
+}
+
+func (r *Runtime) exitCodeFromRawState(ctx context.Context, containerID string) (int, bool) {
+	args := []string{"--root", r.rootDir, "state", containerID}
+	var buf bytes.Buffer
+	if err := r.run(ctx, args, &buf); err != nil {
+		return 0, false
+	}
+	var m map[string]any
+	if err := json.Unmarshal(buf.Bytes(), &m); err != nil {
+		return 0, false
+	}
+	for _, key := range []string{"exit_code", "exitCode", "exit_status", "exitStatus"} {
+		if v, ok := m[key]; ok {
+			switch t := v.(type) {
+			case float64:
+				return int(t), true
+			}
+		}
+	}
+	return 0, false
+}
+
+// Exec runs a one-shot process inside a running container (crun exec).
+func (r *Runtime) Exec(ctx context.Context, containerID string, argv []string, stdout, stderr io.Writer) error {
+	if len(argv) == 0 {
+		return fmt.Errorf("exec: empty argv")
+	}
+	args := append([]string{"--root", r.rootDir, "exec", "--", containerID}, argv...)
+	cmd := exec.CommandContext(ctx, r.binary, args...)
+	switch {
+	case stdout != nil && stderr != nil:
+		cmd.Stdout = stdout
+		cmd.Stderr = stderr
+	case stdout != nil:
+		cmd.Stdout = stdout
+		cmd.Stderr = stdout
+	case stderr != nil:
+		cmd.Stdout = io.Discard
+		cmd.Stderr = stderr
+	default:
+		cmd.Stdout = io.Discard
+		cmd.Stderr = io.Discard
+	}
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("crun exec: %w", err)
+	}
+	return nil
 }
 
 // run executes a crun command, writing stdout to out (if non-nil).

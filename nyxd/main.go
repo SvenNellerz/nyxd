@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/zrougamed/nyxd/internal/control"
 	"github.com/zrougamed/nyxd/internal/image"
 	"github.com/zrougamed/nyxd/internal/logs"
 	"github.com/zrougamed/nyxd/internal/network"
@@ -36,6 +37,7 @@ type Config struct {
 	NetworkName string
 	LogLevel    string
 	Version     bool
+	Socket      string // Unix socket for HTTP control API; empty disables
 }
 
 func main() {
@@ -65,49 +67,48 @@ func main() {
 }
 
 func run(ctx context.Context, cfg Config, logger *slog.Logger) error {
-	// ── Image store ────────────────────────────────────────────────────────────
 	imgStore, err := image.NewStore(cfg.BaseDir + "/images")
 	if err != nil {
 		return fmt.Errorf("image store: %w", err)
 	}
-	_ = imgStore // used by compose loader / CLI
 
-	// ── Overlay manager ────────────────────────────────────────────────────────
 	ovl, err := overlay.NewManager(cfg.BaseDir + "/overlay")
 	if err != nil {
 		return fmt.Errorf("overlay: %w", err)
 	}
 
-	// ── Network manager ────────────────────────────────────────────────────────
 	net := network.NewManager(cfg.NetworkName, cfg.CNIConfDir, cfg.CNIBinDir)
 	if err := net.EnsureNetwork(); err != nil {
 		return fmt.Errorf("cni network setup: %w", err)
 	}
 
-	// ── OCI runtime (crun) ─────────────────────────────────────────────────────
 	rt, err := runtime.New(cfg.CrunBin, cfg.BaseDir+"/run/crun")
 	if err != nil {
 		return fmt.Errorf("runtime: %w", err)
 	}
 
-	// ── Log collector ──────────────────────────────────────────────────────────
 	_, err = logs.NewCollector(cfg.BaseDir+"/logs", logger)
 	if err != nil {
 		return fmt.Errorf("log collector: %w", err)
 	}
 
-	// ── Supervisor ─────────────────────────────────────────────────────────────
 	sup := supervisor.New(rt, ovl, net, cfg.BaseDir, logger)
 
-	// ── Example: pull and run alpine ──────────────────────────────────────────
-	// In production this is driven by the compose loader or gRPC API.
-	// Remove this block and hook up your compose parser or API server.
+	ctl := control.New(logger, rt, imgStore, sup, version, gitCommit, buildDate, cfg.Socket)
+	if err := ctl.Start(); err != nil {
+		logger.Warn("control API not started", "err", err)
+	} else {
+		defer func() {
+			sctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			if err := ctl.Shutdown(sctx); err != nil {
+				logger.Warn("control API shutdown", "err", err)
+			}
+		}()
+	}
+
 	logger.Info("daemon ready - awaiting workload")
 
-	// Demo: you would call sup.Start(ctx, spec) here from your compose/API layer.
-	_ = sup
-
-	// ── Wait for shutdown signal ───────────────────────────────────────────────
 	<-ctx.Done()
 	logger.Info("shutdown signal received")
 
@@ -126,6 +127,7 @@ func parseFlags() Config {
 	flag.StringVar(&cfg.CNIConfDir, "cni-conf-dir", "/etc/cni/net.d", "CNI config directory")
 	flag.StringVar(&cfg.NetworkName, "network", "nyx", "CNI network name")
 	flag.StringVar(&cfg.LogLevel, "log-level", "info", "Log level: debug|info|warn|error")
+	flag.StringVar(&cfg.Socket, "socket", "/run/nyxd/nyxd.sock", "Unix socket for HTTP control API (nyx client); set to \"\" to disable")
 	flag.BoolVar(&cfg.Version, "version", false, "Print version and exit")
 	flag.Parse()
 	return cfg

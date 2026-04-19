@@ -15,7 +15,8 @@ Legend: `[x]` shipped in tree (still may need polish), `[ ]` not done, `[~]` par
 - [x] **Healthcheck library** — `internal/health`: exec (via `crun exec` + `CommandContext`), HTTP, TCP, retries, `onUnhealthy` callback hook (caller must wire policy).
 - [x] **Logs** — `internal/logs`: JSONL append per container, `Tail` (reads whole file — see gaps).
 - [x] **Telemetry types** — `internal/telemetry`: counters + optional Prometheus-ish HTTP handler (`ServeMetrics`) — **not called from daemon today**.
-- [x] **Daemon entry** — `cmd/nyxd`: wiring for store, overlay, CNI manager, runtime, log collector, supervisor; graceful shutdown context (30s); root check; `go.sum` present after `go mod tidy`.
+- [x] **Daemon entry** — `cmd/nyxd`: wiring for store, overlay, CNI manager, runtime, log collector, supervisor; graceful shutdown context (30s); root check; **Unix socket HTTP control API** (`-socket`, default `/run/nyxd/nyxd.sock`); `go.sum` present after `go mod tidy`.
+- [x] **`nyx` CLI client** — `cmd/nyx`: talks to daemon over the socket (`ping`, `version`, `pull`, `exec`); `make build-nyx` → `bin/nyx`.
 - [x] **Unit tests** — compose parser, image ref parsing, native IPAM (Linux build); no end-to-end integration tests.
 - [x] **Docs / packaging** — kernel requirements, native network notes, example service units (`Type=simple` in `packaging/nyxd.service`, `Type=notify` in repo `nyxd.service` without `sd_notify` yet).
 
@@ -23,9 +24,9 @@ Legend: `[x]` shipped in tree (still may need polish), `[ ]` not done, `[~]` par
 
 ## Runtime / crun
 
-- [ ] **Zero-latency exit wait** — `WaitForExit` polls `crun state` every 200ms; prefer `crun events --format json`, pidfd, or inotify on state dir where portable.
-- [ ] **Robust exit code** — `exitCode` reads `<rootDir>/<id>/exit_code`; path/layout may differ across crun versions; fall back to `crun delete` output or state JSON if missing.
-- [ ] **`crun exec` for one-off commands** — no first-class API for `nyxd exec …` / debug shells (health package uses exec for checks only).
+- [ ] **Zero-latency exit wait** — `WaitForExit` still polls `crun state` every 200ms; prefer `crun events --format json`, pidfd, or inotify on state dir where portable.
+- [~] **Robust exit code** — prefers `exit_code` in state JSON when present, then `<root>/<id>/exit_code`, then a second raw JSON parse for alternate keys (`exitCode`, `exit_status`, …). Still no `crun delete` stdout fallback.
+- [x] **`crun exec` for one-off commands** — `runtime.Runtime.Exec` + control route `POST /v1/containers/{id}/exec` + `nyx exec …`.
 
 **Done / partial**
 
@@ -36,8 +37,8 @@ Legend: `[x]` shipped in tree (still may need polish), `[ ]` not done, `[~]` par
 
 ## Supervisor
 
-- [ ] **Shutdown fairness** — `Shutdown` stops containers concurrently but each `Stop` can block; no global deadline beyond caller’s context; one hung `crun kill` can stall overall shutdown.
-- [ ] **Backoff jitter** — `backoff` is deterministic (`attempt² × 100ms` capped); add random jitter to avoid synchronized restarts.
+- [~] **Shutdown fairness** — each parallel `Stop` now wrapped in its own **45s** timeout (`Shutdown` context still shared); a hung `crun kill` no longer blocks others indefinitely, but there is no global “all must finish by T” budget beyond the caller’s `ctx`.
+- [x] **Backoff jitter** — exponential backoff adds small random jitter (`math/rand/v2`) to reduce thundering herds.
 - [ ] **`depends_on` start ordering** — compose validates deps + exposes `TopologicalOrder`, but **supervisor does not** start services in that order (map iteration / separate `Start` calls only).
 - [ ] **Readiness vs “started”** — container considered live after `crun run` succeeds; no wait for init HTTP/TCP or compose `healthcheck` before declaring ready (health `Checker` exists but is not integrated in `supervisor.go`).
 - [ ] **Unhealthy → restart** — no automatic policy wiring from `health.Checker` to `Stop`/`Restart` (callback exists, supervisor never passes it today).
@@ -56,7 +57,7 @@ Legend: `[x]` shipped in tree (still may need polish), `[ ]` not done, `[~]` par
 - [ ] **Resume partial downloads** — interrupted layer fetch restarts full blob (temp file removed on failure paths).
 - [ ] **Platform override** — manifest index handling hard-requires `linux/amd64` string in code; no `-platform` / GOARCH-aware selection for arm64 etc.
 - [ ] **Garbage collection** — blobs never reclaimed when images removed; store grows monotonically.
-- [~] **`fetchBlob` return path** — streams to disk with `io.CopyBuffer`, but **returns `os.ReadFile(dest)`**, loading the full blob into memory for callers that use the return value (safe for small config; wasteful if misused for layers — `pullLayers` discards return but still pays read-after-write today).
+- [~] **`fetchBlob` return path** — layer pulls use **`fetchBlobToDisk`** (stream + verify + rename, no full-blob `ReadFile` after write). Small config blobs still use `fetchBlob` which re-reads from disk (acceptable size).
 
 **Done / partial**
 
@@ -79,10 +80,10 @@ Legend: `[x]` shipped in tree (still may need polish), `[ ]` not done, `[~]` par
 
 ## Native network (`internal/network/native`)
 
-- [ ] **`runNft` / `addPortMappings`** — builds `nft` CLI strings but calls `syscall.Exec` (replaces process — wrong for a library); rules never applied correctly from long-running daemon.
-- [ ] **`ensureNftTable`** — `unix.Exec` inside `sync.Once` replaces process; must use `exec.Command` / netlink nft API instead.
-- [ ] **`withTimeout`** — helper exists but unused in nft path.
-- [ ] **`portmapState`** — declared; `removePortMappings` is effectively empty — teardown does not delete DNAT rules.
+- [~] **`runNft` / `addPortMappings`** — uses `exec.Command` + `withTimeout` instead of `syscall.Exec` (daemon no longer loses the process). Rule syntax / nft availability may still fail at runtime; errors are logged.
+- [x] **`ensureNftTable`** — initial table load uses `exec.Command("/usr/sbin/nft", "-f", file)` inside `sync.Once` (no `unix.Exec`).
+- [x] **`withTimeout`** — used by `runNft` for each shell-out.
+- [ ] **`portmapState`** — declared; `removePortMappings` is still a stub — teardown does not delete DNAT rules.
 - [ ] **IPAM bounds** — `last = base + 0xFFFE` ignores real prefix length; breaks for subnets smaller than `/16` (allocate outside CIDR).
 - [ ] **IPv6** — IPv4-only assumptions throughout bridge + NAT.
 
@@ -140,16 +141,28 @@ Legend: `[x]` shipped in tree (still may need polish), `[ ]` not done, `[~]` par
 
 ---
 
+## `nyx` CLI & Unix control socket
+
+**Yes:** `nyxd` starts an **HTTP server on a Unix domain socket** by default (`-socket=/run/nyxd/nyxd.sock`, override or set `-socket=""` to disable). The **`nyx`** binary is the thin client (`cmd/nyx`).
+
+- [x] **Socket server** — `internal/control`: `GET /v1/ping`, `GET /v1/version`, `GET /v1/containers`, `POST /v1/images/pull`, `POST /v1/containers/{id}/exec`.
+- [x] **`nyx` commands** — `nyx ping|version|pull <ref>|exec <id> -- <argv…>`; socket path via `-socket` or `NYXD_SOCKET`.
+- [ ] **Auth / TLS** — socket is world-group writable (`0660`); no peer cred check, no token yet (local trust model only).
+- [ ] **Structured errors** — failed `exec` still begins `200` + stream body in some cases; tighten status codes and cap output size.
+
+---
+
 ## `cmd/nyxd` / control plane
 
-- [x] **Imports / build** — single `time` import; compiles; `go run ./cmd/nyxd` or `go run ./cmd/nyxd/main.go` works for the **daemon-only** binary.
-- [ ] **Subcommands / API** — no `nyxd image pull`, `nyxd run`, or Unix socket / gRPC; second terminal running `./nyxd image pull` is a **different binary or fork** — upstream `cmd/nyxd` only parses global flags and blocks on signal. Use `go doc` / README `nyxd image pull` once CLI exists, or call `image.Store.Pull` from a small tool. *(See **API, clients & UI** for OpenAPI, SDK samples, and UI.)*
+- [x] **Imports / build** — compiles; `go run ./cmd/nyxd` works.
+- [~] **Subcommands on `nyxd` itself** — still no `nyxd pull` subcommand; use **`nyx pull`** against the socket, or the HTTP API. *(See **API, clients & UI** for OpenAPI, SDK samples, and UI.)*
+- [x] **Control socket flag** — `-socket` (default `/run/nyxd/nyxd.sock`, `""` disables).
 - [ ] **Native network selection** — daemon always constructs **CNI** `network.Manager`; native manager not selectable via flag.
 - [ ] **`systemd-notify`** — `nyxd.service` uses `Type=notify` but process never sends `READY=1` / reloading state; switch to `Type=simple` or implement sd_notify.
 
 **Done / partial**
 
-- [x] **Operational flags** — base dir, crun path, CNI paths, network name, log level, version.
+- [x] **Operational flags** — base dir, crun path, CNI paths, network name, log level, version, socket.
 
 ---
 
@@ -185,7 +198,7 @@ Legend: `[x]` shipped in tree (still may need polish), `[ ]` not done, `[~]` par
 
 ---
 
-## How to run the daemon today (and why `image pull` looks odd)
+## How to run the daemon and the `nyx` client
 
 1. **Build** (Linux, as root for real networking/overlay):
 
@@ -200,24 +213,32 @@ Legend: `[x]` shipped in tree (still may need polish), `[ ]` not done, `[~]` par
    sudo go run ./cmd/nyxd --log-level info
    ```
 
-2. **What you should see** — Logs like `daemon ready - awaiting workload` then the process **blocks** until SIGINT/SIGTERM. There is **no** built-in subcommand in `cmd/nyxd` to pull or run images yet; workload wiring (`supervisor.Start`, compose loader, HTTP API) is still TODO.
+2. **Control API** — With defaults, the daemon listens on **`/run/nyxd/nyxd.sock`**. From another shell (root or user in group that can RW the socket):
 
-3. **Pulling images** — Use the Go API (`image.Store.Pull`) from code/tests, or add a thin CLI wrapper package, or wait for roadmap items above. Running `./nyxd image pull …` only works if you built a **different** `main` that implements subcommands (not this repo’s `cmd/nyxd` alone).
+   ```bash
+   make build-nyx
+   ./bin/nyx ping
+   ./bin/nyx version
+   ./bin/nyx pull nginx:alpine
+   ```
 
-4. **After pull (future / custom glue)** — You still need: blob paths → overlay prepare → `bundle.Generate` → `supervisor.Start` / `runtime.Run`. The roadmap items track making that path first-class.
+3. **What you should see** — Daemon logs `daemon ready - awaiting workload` and `control API listening` when the socket bound. The process blocks until SIGINT/SIGTERM.
+
+4. **Running a workload** — `nyx pull` only populates the image store; **`nyx exec`** requires a **running** container id managed by crun under the same `--root` as nyxd. Wiring `supervisor.Start` + compose is still tracked in roadmap items below.
+
+5. **Disable the socket** — `sudo ./bin/nyxd -socket="" …` if you do not want the control listener.
 
 ---
 
 ## Suggested priority (opinionated)
 
-1. Fix **native nft** path (`Exec` → `exec.Command`) or hide feature flag until safe; same for portmap teardown + IPAM `last` calculation.  
-2. **CLI / socket API** — single binary with `serve`, `pull`, `run`, `logs`, or minimal HTTP control plane.  
-3. **Supervisor**: integrate **health** + **`TopologicalOrder`** + shutdown deadlines.  
-4. **Runtime**: `crun events` / better exit wait + `crun exec` surface for ops.  
-5. **Registry**: auth + platform + GC + resumable layers.  
-6. **CI + integration tests** on Linux runners with crun + CNI.  
-7. **OpenAPI spec** → **SDK samples** → **UI** (after the control HTTP API is stable enough to version).
+1. **nft / portmap follow-ups** — real rule handles + `removePortMappings`; fix IPAM `last` for non-/16 subnets.  
+2. **Supervisor**: integrate **health** + **`TopologicalOrder`** + optional global shutdown budget.  
+3. **Runtime**: `crun events` / pidfd instead of poll-only `WaitForExit`.  
+4. **Registry**: auth + platform + GC + resumable layers.  
+5. **OpenAPI spec** → **SDK samples** → **UI** (document `/v1/*` first).  
+6. **CI + integration tests** on Linux runners with crun + CNI.
 
 ---
 
-*Last reviewed against repository layout on 2026-05-16. Update checkboxes when merging features.*
+*Last reviewed against repository layout on 2026-05-17. Update checkboxes when merging features.*

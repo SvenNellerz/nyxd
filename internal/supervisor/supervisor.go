@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math/rand/v2"
 	"sync"
 	"time"
 
@@ -192,7 +193,9 @@ func (s *Supervisor) Shutdown(ctx context.Context) {
 		wg.Add(1)
 		go func(id string) {
 			defer wg.Done()
-			s.Stop(ctx, id) //nolint:errcheck
+			stopCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
+			defer cancel()
+			s.Stop(stopCtx, id) //nolint:errcheck
 		}(id)
 	}
 	wg.Wait()
@@ -364,11 +367,12 @@ func (s *Supervisor) cleanup(e *containerEntry) {
 	s.ovl.Remove(e.spec.ID) //nolint:errcheck
 }
 
-// backoff returns an exponential backoff delay capped at 30s.
+// backoff returns an exponential backoff delay capped at 30s, with small jitter.
 func backoff(attempt int) time.Duration {
 	d := time.Duration(attempt) * time.Duration(attempt) * 100 * time.Millisecond
 	if d > 30*time.Second {
 		d = 30 * time.Second
 	}
-	return d
+	jitter := time.Duration(rand.Int64N(int64(d/10 + 1))) // up to ~10% extra
+	return d + jitter
 }

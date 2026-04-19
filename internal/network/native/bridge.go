@@ -20,8 +20,10 @@ import (
 	"log/slog"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -461,17 +463,23 @@ func removePortMappings(containerID string, log *slog.Logger) error {
 }
 
 func runNft(rule string) error {
-	// Ensure base table + chains exist first.
-	ensureNftTable()
-	cmd := fmt.Sprintf("/usr/sbin/nft %s", rule)
-	return syscall.Exec("/usr/sbin/nft", []string{"nft", "-f", "-"}, nil)
-	_ = cmd
-	return nil
+	if err := ensureNftTable(); err != nil {
+		return err
+	}
+	return withTimeout(30*time.Second, func() error {
+		cmd := exec.Command("/bin/sh", "-c", rule)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("%w: %s", err, strings.TrimSpace(string(out)))
+		}
+		return nil
+	})
 }
 
 var nftTableOnce sync.Once
 
-func ensureNftTable() {
+func ensureNftTable() error {
+	var initErr error
 	nftTableOnce.Do(func() {
 		rules := `
 table ip nyxd-nat {
@@ -486,14 +494,25 @@ table ip nyxd-nat {
 `
 		f, err := os.CreateTemp("", "nyxd-nft-*.rules")
 		if err != nil {
+			initErr = err
 			return
 		}
 		defer os.Remove(f.Name())
-		f.WriteString(rules)
-		f.Close()
-		// nft -f <file> — idempotent if table already exists
-		unix.Exec("/usr/sbin/nft", []string{"nft", "-f", f.Name()}, nil) //nolint:errcheck
+		if _, err := f.WriteString(rules); err != nil {
+			initErr = err
+			return
+		}
+		if err := f.Close(); err != nil {
+			initErr = err
+			return
+		}
+		cmd := exec.Command("/usr/sbin/nft", "-f", f.Name())
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			initErr = fmt.Errorf("nft init: %w: %s", err, strings.TrimSpace(string(out)))
+		}
 	})
+	return initErr
 }
 
 // ─── Netlink helpers ──────────────────────────────────────────────────────────

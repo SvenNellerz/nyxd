@@ -174,7 +174,7 @@ func (s *Store) pullLayers(ctx context.Context, client *registryClient, layers [
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			_, err := s.fetchBlob(ctx, client, desc)
+			err := s.fetchBlobToDisk(ctx, client, desc)
 			results <- result{err}
 		}(layer)
 	}
@@ -193,7 +193,7 @@ func (s *Store) pullLayers(ctx context.Context, client *registryClient, layers [
 	return errors.Join(errs...)
 }
 
-// fetchBlob downloads a blob, verifies digest, and writes it atomically.
+// fetchBlob downloads a small blob (e.g. config) and returns its bytes.
 func (s *Store) fetchBlob(ctx context.Context, client *registryClient, desc oci.Descriptor) ([]byte, error) {
 	dest := s.BlobPath(desc.Digest)
 
@@ -201,15 +201,28 @@ func (s *Store) fetchBlob(ctx context.Context, client *registryClient, desc oci.
 		return data, nil
 	}
 
+	if err := s.fetchBlobToDisk(ctx, client, desc); err != nil {
+		return nil, err
+	}
+	return os.ReadFile(dest)
+}
+
+// fetchBlobToDisk streams a blob to the content store without holding the full payload in memory.
+func (s *Store) fetchBlobToDisk(ctx context.Context, client *registryClient, desc oci.Descriptor) error {
+	dest := s.BlobPath(desc.Digest)
+	if _, err := os.Stat(dest); err == nil {
+		return nil
+	}
+
 	rc, err := client.blob(ctx, desc.Digest)
 	if err != nil {
-		return nil, fmt.Errorf("fetch blob %s: %w", desc.Digest, err)
+		return fmt.Errorf("fetch blob %s: %w", desc.Digest, err)
 	}
 	defer rc.Close()
 
 	tmp, err := os.CreateTemp(filepath.Dir(dest), ".tmp-blob-*")
 	if err != nil {
-		return nil, err
+		return err
 	}
 	tmpName := tmp.Name()
 
@@ -224,26 +237,25 @@ func (s *Store) fetchBlob(ctx context.Context, client *registryClient, desc oci.
 
 	if _, err := io.CopyBuffer(tmp, tee, buf); err != nil {
 		cleanup()
-		return nil, fmt.Errorf("stream blob: %w", err)
+		return fmt.Errorf("stream blob: %w", err)
 	}
 	if err := tmp.Sync(); err != nil {
 		cleanup()
-		return nil, err
+		return err
 	}
 	tmp.Close()
 
 	got := fmt.Sprintf("sha256:%x", h.Sum(nil))
 	if got != desc.Digest {
 		os.Remove(tmpName)
-		return nil, fmt.Errorf("digest mismatch: want %s got %s", desc.Digest, got)
+		return fmt.Errorf("digest mismatch: want %s got %s", desc.Digest, got)
 	}
 
 	if err := os.Rename(tmpName, dest); err != nil {
 		os.Remove(tmpName)
-		return nil, err
+		return err
 	}
-
-	return os.ReadFile(dest)
+	return nil
 }
 
 func (s *Store) writeImageMeta(ref string, m *oci.Manifest, cfg *oci.ImageConfig) error {
