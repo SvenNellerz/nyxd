@@ -94,7 +94,7 @@ func run(ctx context.Context, cfg Config, logger *slog.Logger) error {
 
 	sup := supervisor.New(rt, ovl, net, cfg.BaseDir, logger)
 
-	ctl := control.New(logger, rt, imgStore, sup, version, gitCommit, buildDate, cfg.Socket)
+	ctl := control.New(logger, rt, imgStore, sup, ctx, nil, version, gitCommit, buildDate, cfg.Socket)
 	if err := ctl.Start(); err != nil {
 		logger.Warn("control API not started", "err", err)
 	} else {

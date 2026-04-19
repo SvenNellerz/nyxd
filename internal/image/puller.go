@@ -158,6 +158,24 @@ func (s *Store) LoadImageMeta(ref string) (*oci.Manifest, *oci.ImageConfig, erro
 	return &m, &cfg, nil
 }
 
+// ResolvePulledImage returns manifest, config, and on-disk blob paths (base layer first)
+// for an image already present in the store (pull first).
+func (s *Store) ResolvePulledImage(ref string) (*oci.Manifest, *oci.ImageConfig, []string, error) {
+	m, cfg, err := s.LoadImageMeta(ref)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	paths := make([]string, 0, len(m.Layers))
+	for _, d := range m.Layers {
+		p := s.BlobPath(d.Digest)
+		if _, err := os.Stat(p); err != nil {
+			return nil, nil, nil, fmt.Errorf("missing layer blob %s: %w", d.Digest, err)
+		}
+		paths = append(paths, p)
+	}
+	return m, cfg, paths, nil
+}
+
 // pullLayers fetches all layers with bounded concurrency.
 func (s *Store) pullLayers(ctx context.Context, client *registryClient, layers []oci.Descriptor) error {
 	type result struct{ err error }

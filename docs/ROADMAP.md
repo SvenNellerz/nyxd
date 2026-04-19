@@ -16,7 +16,7 @@ Legend: `[x]` shipped in tree (still may need polish), `[ ]` not done, `[~]` par
 - [x] **Logs** — `internal/logs`: JSONL append per container, `Tail` (reads whole file — see gaps).
 - [x] **Telemetry types** — `internal/telemetry`: counters + optional Prometheus-ish HTTP handler (`ServeMetrics`) — **not called from daemon today**.
 - [x] **Daemon entry** — `cmd/nyxd`: wiring for store, overlay, CNI manager, runtime, log collector, supervisor; graceful shutdown context (30s); root check; **Unix socket HTTP control API** (`-socket`, default `/run/nyxd/nyxd.sock`); `go.sum` present after `go mod tidy`.
-- [x] **`nyx` CLI client** — `cmd/nyx`: talks to daemon over the socket (`ping`, `version`, `pull`, `exec`); `make build-nyx` → `bin/nyx`.
+- [x] **`nyx` CLI client** — `cmd/nyx`: `ping`, `version`, `pull`, `run`, `exec`; `make build-nyx` → `bin/nyx`.
 - [x] **Unit tests** — compose parser, image ref parsing, native IPAM (Linux build); no end-to-end integration tests.
 - [x] **Docs / packaging** — kernel requirements, native network notes, example service units (`Type=simple` in `packaging/nyxd.service`, `Type=notify` in repo `nyxd.service` without `sd_notify` yet).
 
@@ -145,8 +145,8 @@ Legend: `[x]` shipped in tree (still may need polish), `[ ]` not done, `[~]` par
 
 **Yes:** `nyxd` starts an **HTTP server on a Unix domain socket** by default (`-socket=/run/nyxd/nyxd.sock`, override or set `-socket=""` to disable). The **`nyx`** binary is the thin client (`cmd/nyx`).
 
-- [x] **Socket server** — `internal/control`: `GET /v1/ping`, `GET /v1/version`, `GET /v1/containers`, `POST /v1/images/pull`, `POST /v1/containers/{id}/exec`.
-- [x] **`nyx` commands** — `nyx ping|version|pull <ref>|exec <id> -- <argv…>`; socket path via `-socket` or `NYXD_SOCKET`.
+- [x] **Socket server** — `internal/control`: `GET /v1/ping`, `GET /v1/version`, `GET /v1/containers`, `POST /v1/images/pull`, `POST /v1/containers/run`, `POST /v1/containers/{id}/exec`.
+- [x] **`nyx run`** — `POST /v1/containers/run`: resolves pulled image (`ResolvePulledImage`), builds `ContainerSpec`, **`supervisor.Start`** (overlay + CNI + bundle + `crun run --detach`). Optional `restart` policy in JSON.
 - [ ] **Auth / TLS** — socket is world-group writable (`0660`); no peer cred check, no token yet (local trust model only).
 - [ ] **Structured errors** — failed `exec` still begins `200` + stream body in some cases; tighten status codes and cap output size.
 
@@ -220,11 +220,12 @@ Legend: `[x]` shipped in tree (still may need polish), `[ ]` not done, `[~]` par
    ./bin/nyx ping
    ./bin/nyx version
    ./bin/nyx pull nginx:alpine
+   ./bin/nyx run nginx:alpine
    ```
 
 3. **What you should see** — Daemon logs `daemon ready - awaiting workload` and `control API listening` when the socket bound. The process blocks until SIGINT/SIGTERM.
 
-4. **Running a workload** — `nyx pull` only populates the image store; **`nyx exec`** requires a **running** container id managed by crun under the same `--root` as nyxd. Wiring `supervisor.Start` + compose is still tracked in roadmap items below.
+4. **Running a workload** — After **`nyx pull <ref>`**, **`nyx run <ref>`** calls **`POST /v1/containers/run`** (default restart `unless-stopped`). The daemon resolves local image metadata + layer blobs, then **`supervisor.Start`** builds overlay, CNI, bundle, and **`crun run --detach`**. Use **`nyx exec <id> -- …`** against the returned `id` for one-off commands inside the container.
 
 5. **Disable the socket** — `sudo ./bin/nyxd -socket="" …` if you do not want the control listener.
 

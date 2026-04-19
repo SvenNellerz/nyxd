@@ -18,6 +18,7 @@ import (
 
 	"github.com/zrougamed/nyxd/internal/image"
 	"github.com/zrougamed/nyxd/internal/runtime"
+	"github.com/zrougamed/nyxd/internal/supervisor"
 )
 
 // Lister optionally lists supervised container IDs.
@@ -31,21 +32,28 @@ type Server struct {
 	rt        *runtime.Runtime
 	store     *image.Store
 	lister    Lister
+	sup       *supervisor.Supervisor
+	baseCtx   context.Context
 	version   string
 	gitCommit string
 	buildDate string
 	socket    string
 
-	srv     *http.Server
-	ln      net.Listener
-	execMu  sync.Mutex
+	srv    *http.Server
+	ln     net.Listener
+	execMu sync.Mutex
 }
 
-// New constructs a control server. lister may be nil (containers route returns empty).
-// store may be nil (image pull returns 503). socket empty disables listening.
-func New(log *slog.Logger, rt *runtime.Runtime, store *image.Store, lister Lister, version, commit, date, socket string) *Server {
+// New constructs a control server. sup may be nil (run returns 503). store may be nil (pull 503).
+// baseCtx should be the daemon lifetime context (e.g. signal-notify ctx) for supervisor.Start.
+// lister is used for GET /v1/containers; if nil but sup non-nil, sup is used as Lister.
+func New(log *slog.Logger, rt *runtime.Runtime, store *image.Store, sup *supervisor.Supervisor, baseCtx context.Context, lister Lister, version, commit, date, socket string) *Server {
+	l := lister
+	if l == nil && sup != nil {
+		l = sup
+	}
 	return &Server{
-		log: log, rt: rt, store: store, lister: lister,
+		log: log, rt: rt, store: store, lister: l, sup: sup, baseCtx: baseCtx,
 		version: version, gitCommit: commit, buildDate: date,
 		socket: socket,
 	}
@@ -77,6 +85,7 @@ func (s *Server) Start() error {
 	mux.HandleFunc("GET /v1/version", s.handleVersion)
 	mux.HandleFunc("GET /v1/containers", s.handleContainers)
 	mux.HandleFunc("POST /v1/containers/{id}/exec", s.handleExec)
+	mux.HandleFunc("POST /v1/containers/run", s.handleContainerRun)
 	mux.HandleFunc("POST /v1/images/pull", s.handleImagePull)
 
 	s.srv = &http.Server{
@@ -198,4 +207,111 @@ func (s *Server) handleImagePull(w http.ResponseWriter, r *http.Request) {
 			"env_len":        len(cfg.Config.Env),
 		},
 	})
+}
+
+type runRequest struct {
+	ID       string   `json:"id,omitempty"`
+	Image    string   `json:"image"`
+	Args     []string `json:"args,omitempty"`
+	Env      []string `json:"env,omitempty"`
+	Hostname string   `json:"hostname,omitempty"`
+	Restart  string   `json:"restart,omitempty"`
+}
+
+func (s *Server) handleContainerRun(w http.ResponseWriter, r *http.Request) {
+	if s.sup == nil {
+		http.Error(w, "supervisor not available", http.StatusServiceUnavailable)
+		return
+	}
+	if s.store == nil {
+		http.Error(w, "image store not available", http.StatusServiceUnavailable)
+		return
+	}
+	baseCtx := s.baseCtx
+	if baseCtx == nil {
+		baseCtx = context.Background()
+	}
+
+	var body runRequest
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&body); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	image := strings.TrimSpace(body.Image)
+	if image == "" {
+		http.Error(w, "missing image", http.StatusBadRequest)
+		return
+	}
+	id := strings.TrimSpace(body.ID)
+	if id == "" {
+		id = generateContainerID(image)
+	}
+
+	m, cfg, paths, err := s.store.ResolvePulledImage(image)
+	if err != nil {
+		http.Error(w, "resolve image (pull first): "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	spec := supervisor.ContainerSpec{
+		ID:             id,
+		Image:          image,
+		ImageConfig:    cfg,
+		ManifestLayers: m.Layers,
+		BlobPaths:      paths,
+		Env:            body.Env,
+		Args:           body.Args,
+		Hostname:       body.Hostname,
+		RestartPolicy:  parseRestartPolicy(body.Restart),
+		ReadOnly:       false,
+	}
+	if err := s.sup.Start(baseCtx, spec); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"ok":    true,
+		"id":    id,
+		"image": image,
+	})
+}
+
+func parseRestartPolicy(s string) supervisor.RestartPolicy {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "", "unless-stopped", "unless_stopped":
+		return supervisor.RestartUnlessStopped
+	case "always":
+		return supervisor.RestartAlways
+	case "on-failure", "on_failure":
+		return supervisor.RestartOnFailure
+	case "no", "never":
+		return supervisor.RestartNever
+	default:
+		return supervisor.RestartNever
+	}
+}
+
+func generateContainerID(image string) string {
+	var b strings.Builder
+	for _, r := range image {
+		switch r {
+		case '/', ':', '@', '.':
+			b.WriteByte('-')
+		default:
+			if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
+				b.WriteRune(r)
+			} else {
+				b.WriteByte('-')
+			}
+		}
+	}
+	base := strings.Trim(b.String(), "-")
+	if len(base) > 48 {
+		base = base[:48]
+	}
+	if base == "" {
+		base = "c"
+	}
+	return fmt.Sprintf("%s-%d", base, time.Now().UnixNano()%1e9)
 }

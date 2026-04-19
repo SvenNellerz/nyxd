@@ -60,6 +60,8 @@ func run(args []string) error {
 			return fmt.Errorf("usage: nyx pull <ref>")
 		}
 		return doPull(socket, args[1])
+	case "run":
+		return doRun(socket, args[1:])
 	case "exec":
 		return doExec(socket, args[1:])
 	default:
@@ -74,7 +76,8 @@ Commands:
   ping              GET /v1/ping
   version           GET /v1/version
   pull <ref>        POST /v1/images/pull
-  exec <id> -- <argv...>   POST /v1/containers/{id}/exec
+  run [--name ID] <image> [-- <argv...>]   POST /v1/containers/run
+  exec <id> [--] <argv...>   POST /v1/containers/{id}/exec
 
 Environment:
   NYXD_SOCKET   default control socket (default %s)
@@ -151,9 +154,86 @@ func doPull(socket, ref string) error {
 	return nil
 }
 
+func parseRunArgs(args []string) (name, image string, cmdArgs []string, err error) {
+	i := 0
+	for i < len(args) {
+		if args[i] == "--name" && i+1 < len(args) {
+			name = args[i+1]
+			i += 2
+			continue
+		}
+		if strings.HasPrefix(args[i], "--name=") {
+			name = strings.TrimPrefix(args[i], "--name=")
+			i++
+			continue
+		}
+		break
+	}
+	rest := args[i:]
+	if len(rest) < 1 {
+		return "", "", nil, fmt.Errorf("usage: nyx run [--name ID] <image> [-- <argv...>]")
+	}
+	dash := -1
+	for j, a := range rest {
+		if a == "--" {
+			dash = j
+			break
+		}
+	}
+	switch {
+	case dash == 0:
+		return "", "", nil, fmt.Errorf("missing image before --")
+	case dash > 0:
+		if dash != 1 {
+			return "", "", nil, fmt.Errorf("expected a single image ref before --")
+		}
+		image = rest[0]
+		cmdArgs = rest[dash+1:]
+	default:
+		image = rest[0]
+	}
+	return name, image, cmdArgs, nil
+}
+
+func doRun(socket string, args []string) error {
+	name, image, cmdArgs, err := parseRunArgs(args)
+	if err != nil {
+		return err
+	}
+	body := map[string]any{"image": image}
+	if name != "" {
+		body["id"] = name
+	}
+	if len(cmdArgs) > 0 {
+		body["args"] = cmdArgs
+	}
+	raw, _ := json.Marshal(body)
+
+	c := httpClient(socket)
+	req, err := http.NewRequest(http.MethodPost, "http://unix/v1/containers/run", bytes.NewReader(raw))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := c.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("run: %s: %s", resp.Status, bytes.TrimSpace(b))
+	}
+	os.Stdout.Write(b)
+	if len(b) > 0 && b[len(b)-1] != '\n' {
+		fmt.Println()
+	}
+	return nil
+}
+
 func doExec(socket string, args []string) error {
 	if len(args) < 1 {
-		return fmt.Errorf("usage: nyx exec <container> -- <argv...>")
+		return fmt.Errorf("usage: nyx exec <id> [--] <argv...>")
 	}
 	id := args[0]
 	rest := args[1:]
@@ -165,7 +245,7 @@ func doExec(socket string, args []string) error {
 		}
 	}
 	if len(argv) == 0 {
-		return fmt.Errorf("missing -- and command after container id")
+		return fmt.Errorf("missing command after container id")
 	}
 
 	c := httpClient(socket)
