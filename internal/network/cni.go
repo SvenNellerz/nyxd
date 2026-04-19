@@ -1,6 +1,4 @@
-// Package network manages CNI networking for containers.
-// Calls CNI plugins directly via exec - no CNI library dependency.
-// Supports: bridge, loopback, portmap, bandwidth.
+// CNI plugin executor: conflist generation and exec-based plugin runs.
 package network
 
 import (

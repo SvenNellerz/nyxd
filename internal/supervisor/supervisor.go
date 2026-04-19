@@ -1,5 +1,7 @@
 // Package supervisor manages container lifecycle: start, monitor, restart, stop.
 // Implements restart policies: always, on-failure, unless-stopped, never.
+//
+// Networking is injected as [network.Backend] (native or CNI exec); see docs/networking.md.
 package supervisor
 
 import (
@@ -78,7 +80,8 @@ type Supervisor struct {
 	wg         sync.WaitGroup
 }
 
-// New creates a Supervisor.
+// New constructs a Supervisor. net must implement [network.Backend]
+// (typically native in-process networking or the CNI exec [network.Manager]).
 func New(rt *runtime.Runtime, ovl *overlay.Manager, net network.Backend, baseDir string, log *slog.Logger) *Supervisor {
 	return &Supervisor{
 		rt:         rt,

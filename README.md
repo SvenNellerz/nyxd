@@ -4,7 +4,7 @@ Minimal OCI container orchestrator for NyxOS edge nodes.
 
 **Zero Docker. Zero Podman. Zero containerd.**
 
-Uses `crun` as the OCI runtime. **Default networking is in-process** (`internal/network/native`: bridge, veth, IPAM, nftables port maps). Optional **`-net-driver=cni`** uses standard CNI plugins from disk (`/opt/cni/bin`).
+Uses `crun` as the OCI runtime. **Container networking** defaults to in-process native mode; optional CNI plugins are supported. See **[docs/networking.md](docs/networking.md)** for `-net-driver`, `network.Backend`, the startup log line, `nyxd.service`, and examples.
 
 ## Architecture
 
@@ -36,6 +36,14 @@ Go external modules: **2**
 - `golang.org/x/sys` - Linux syscall wrappers
 
 Everything else: **stdlib only**.
+
+## Networking (native vs CNI)
+
+- **Default:** `nyxd --net-driver=native` (implicit if omitted). No `/opt/cni/bin` required. Startup logs include `"network backend","driver":"native"`.
+- **Optional CNI:** `nyxd -net-driver=cni -cni-bin-dir=/opt/cni/bin ...` after installing plugins (e.g. `make install-cni`).
+- **Client:** `nyx` does not choose the driver; restart **`nyxd`** after changing flags.
+
+Full detail: **[docs/networking.md](docs/networking.md)**.
 
 ## Build
 

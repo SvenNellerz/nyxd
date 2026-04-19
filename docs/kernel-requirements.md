@@ -169,8 +169,10 @@ All of these are available to root by default. nyxd must run as root.
 /var/lib/nyxd/        # base data dir (ext4 or xfs recommended, not tmpfs)
 /run/nyxd/            # runtime state (tmpfs is fine, cleared on reboot)
 /run/netns/           # network namespace bind-mounts
-/opt/cni/bin/         # only needed if using external CNI plugins (not native mode)
+/opt/cni/bin/         # only with nyxd -net-driver=cni (see docs/networking.md)
 ```
+
+See **[docs/networking.md](networking.md)** for default native networking vs optional CNI.
 
 Disk space: allow **10 GB minimum** for image blob cache under `/var/lib/nyxd/images/`.
 

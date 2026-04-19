@@ -80,6 +80,10 @@ Legend: `[x]` shipped in tree (still may need polish), `[ ]` not done, `[~]` par
 
 ## Native network (`internal/network/native`)
 
+- **Operator guide:** [networking.md](networking.md) — `-net-driver`, `network.Backend`, `nyxd` vs `nyx`, systemd, CNI optional path.
+
+### Design / internals
+
 - [~] **`runNft` / `addPortMappings`** — uses `exec.Command` + `withTimeout` instead of `syscall.Exec` (daemon no longer loses the process). Rule syntax / nft availability may still fail at runtime; errors are logged.
 - [x] **`ensureNftTable`** — initial table load uses `exec.Command("/usr/sbin/nft", "-f", file)` inside `sync.Once` (no `unix.Exec`).
 - [x] **`withTimeout`** — used by `runNft` for each shell-out.
@@ -223,7 +227,7 @@ Legend: `[x]` shipped in tree (still may need polish), `[ ]` not done, `[~]` par
    ./bin/nyx run nginx:alpine
    ```
 
-3. **What you should see** — Daemon logs `daemon ready - awaiting workload` and `control API listening` when the socket bound. The process blocks until SIGINT/SIGTERM.
+3. **What you should see** — Daemon logs include **`network backend`** with **`driver":"native"`** (unless you set `-net-driver=cni`), then `daemon ready - awaiting workload` and `control API listening` when the socket bound. The process blocks until SIGINT/SIGTERM. See [networking.md](networking.md).
 
 4. **Running a workload** — After **`nyx pull <ref>`**, **`nyx run <ref>`** calls **`POST /v1/containers/run`** (default restart `unless-stopped`). The daemon resolves local image metadata + layer blobs, then **`supervisor.Start`** builds overlay, **networking** (default in-process native), bundle, and **`crun run --detach`**. Use **`nyx exec <id> -- …`** against the returned `id` for one-off commands inside the container.
 

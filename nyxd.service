@@ -6,6 +6,9 @@ After=network.target
 Wants=network.target
 
 [Service]
+# Default: in-process networking (no /opt/cni/bin). For CNI plugins use e.g.:
+#   --net-driver=cni --cni-bin-dir=/opt/cni/bin --cni-conf-dir=/etc/cni/net.d --network=nyx
+# and extend ReadWritePaths with /etc/cni if needed.
 Type=notify
 ExecStart=/usr/local/bin/nyxd \
     --base-dir=/var/lib/nyxd \

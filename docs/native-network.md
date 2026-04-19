@@ -1,5 +1,7 @@
 # nyxd Native Network Plugin
 
+For **daemon flags**, **systemd**, **`nyx` vs `nyxd`**, and the **`network.Backend`** abstraction, see [Networking overview](networking.md).
+
 ## Why no external CNI binaries
 
 The standard `containernetworking/plugins` approach requires external binaries
