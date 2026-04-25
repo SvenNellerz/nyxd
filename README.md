@@ -42,6 +42,7 @@ Everything else: **stdlib only**.
 - **Default:** `nyxd --net-driver=native` (implicit if omitted). No `/opt/cni/bin` required. Startup logs include `"network backend","driver":"native"`.
 - **Optional CNI:** `nyxd -net-driver=cni -cni-bin-dir=/opt/cni/bin ...` after installing plugins (e.g. `make install-cni`).
 - **Client:** `nyx` does not choose the driver; restart **`nyxd`** after changing flags.
+- **`nyx run`:** waits after start; **Ctrl+C** stops the container via the control API. Use **`nyx run -d`** for detach, or **`nyx stop <id>`**.
 
 Full detail: **[docs/networking.md](docs/networking.md)**.
 

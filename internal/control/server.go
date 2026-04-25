@@ -85,6 +85,7 @@ func (s *Server) Start() error {
 	mux.HandleFunc("GET /v1/version", s.handleVersion)
 	mux.HandleFunc("GET /v1/containers", s.handleContainers)
 	mux.HandleFunc("POST /v1/containers/{id}/exec", s.handleExec)
+	mux.HandleFunc("POST /v1/containers/{id}/stop", s.handleContainerStop)
 	mux.HandleFunc("POST /v1/containers/run", s.handleContainerRun)
 	mux.HandleFunc("POST /v1/images/pull", s.handleImagePull)
 
@@ -169,6 +170,33 @@ func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
 	if err := s.rt.Exec(r.Context(), id, body.Argv, w, w); err != nil {
 		s.log.Warn("control exec", "id", id, "err", err)
 	}
+}
+
+func (s *Server) handleContainerStop(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.sup == nil {
+		http.Error(w, "supervisor not available", http.StatusServiceUnavailable)
+		return
+	}
+	id := strings.TrimSpace(r.PathValue("id"))
+	if id == "" {
+		http.Error(w, "missing container id", http.StatusBadRequest)
+		return
+	}
+	if err := s.sup.Stop(r.Context(), id); err != nil {
+		msg := err.Error()
+		if strings.Contains(msg, "not found") {
+			http.Error(w, msg, http.StatusNotFound)
+			return
+		}
+		http.Error(w, msg, http.StatusBadRequest)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "id": id})
 }
 
 type pullRequest struct {

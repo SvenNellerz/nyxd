@@ -22,12 +22,14 @@ On startup you should see a JSON log line similar to:
 {"msg":"network backend","driver":"native",...}
 ```
 
-Then run a container with the client (same as before):
+Then run a container:
 
 ```bash
 sudo ./nyx pull nginx:alpine
 sudo ./nyx run nginx:alpine
 ```
+
+**Foreground vs detach:** by default, `nyx run` prints the JSON response, then **waits**; **Ctrl+C** (or SIGTERM) calls **`POST /v1/containers/{id}/stop`** so the workload is torn down (similar to `docker run` without `-d`). Use **`nyx run -d`** / **`--detach`** to exit immediately after start (old behavior). You can also run **`nyx stop <id>`** from another terminal.
 
 Native networking is implemented under `internal/network/native/` (bridge, veth, IPAM, nftables-based port maps). It does **not** require the standard CNI plugin bundle under `/opt/cni/bin`.
 

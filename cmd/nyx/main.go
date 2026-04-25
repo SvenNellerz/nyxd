@@ -9,8 +9,11 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -63,6 +66,11 @@ func run(args []string) error {
 		return doPull(socket, ref, jsonOut)
 	case "run":
 		return doRun(socket, args[1:])
+	case "stop":
+		if len(args) < 2 {
+			return fmt.Errorf("usage: nyx stop <id>")
+		}
+		return doStop(socket, args[1])
 	case "exec":
 		return doExec(socket, args[1:])
 	default:
@@ -77,7 +85,8 @@ Commands:
   ping              GET /v1/ping
   version           GET /v1/version
   pull [--json] <ref>   streamed progress + summary (use --json for raw JSON)
-  run [--name ID] <image> [-- <argv...>]   POST /v1/containers/run
+  run [-d|--detach] [--name ID] <image> [-- <argv...>]   POST /v1/containers/run (foreground: Ctrl+C stops)
+  stop <id>         POST /v1/containers/{id}/stop
   exec <id> [--] <argv...>   POST /v1/containers/{id}/exec
 
 Environment:
@@ -131,24 +140,31 @@ func doVersion(socket string) error {
 	return err
 }
 
-func parseRunArgs(args []string) (name, image string, cmdArgs []string, err error) {
+func parseRunArgs(args []string) (name, image string, cmdArgs []string, detach bool, err error) {
 	i := 0
+flags:
 	for i < len(args) {
-		if args[i] == "--name" && i+1 < len(args) {
+		a := args[i]
+		switch {
+		case a == "-d" || a == "--detach":
+			detach = true
+			i++
+		case a == "--name" && i+1 < len(args):
 			name = args[i+1]
 			i += 2
-			continue
-		}
-		if strings.HasPrefix(args[i], "--name=") {
-			name = strings.TrimPrefix(args[i], "--name=")
+		case strings.HasPrefix(a, "--name="):
+			name = strings.TrimPrefix(a, "--name=")
 			i++
-			continue
+		default:
+			if strings.HasPrefix(a, "-") {
+				return "", "", nil, false, fmt.Errorf("unknown flag %q", a)
+			}
+			break flags
 		}
-		break
 	}
 	rest := args[i:]
 	if len(rest) < 1 {
-		return "", "", nil, fmt.Errorf("usage: nyx run [--name ID] <image> [-- <argv...>]")
+		return "", "", nil, false, fmt.Errorf("usage: nyx run [-d|--detach] [--name ID] <image> [-- <argv...>]")
 	}
 	dash := -1
 	for j, a := range rest {
@@ -159,21 +175,21 @@ func parseRunArgs(args []string) (name, image string, cmdArgs []string, err erro
 	}
 	switch {
 	case dash == 0:
-		return "", "", nil, fmt.Errorf("missing image before --")
+		return "", "", nil, false, fmt.Errorf("missing image before --")
 	case dash > 0:
 		if dash != 1 {
-			return "", "", nil, fmt.Errorf("expected a single image ref before --")
+			return "", "", nil, false, fmt.Errorf("expected a single image ref before --")
 		}
 		image = rest[0]
 		cmdArgs = rest[dash+1:]
 	default:
 		image = rest[0]
 	}
-	return name, image, cmdArgs, nil
+	return name, image, cmdArgs, detach, nil
 }
 
 func doRun(socket string, args []string) error {
-	name, image, cmdArgs, err := parseRunArgs(args)
+	name, image, cmdArgs, detach, err := parseRunArgs(args)
 	if err != nil {
 		return err
 	}
@@ -205,6 +221,55 @@ func doRun(socket string, args []string) error {
 	if len(b) > 0 && b[len(b)-1] != '\n' {
 		fmt.Println()
 	}
+
+	var out struct {
+		OK bool   `json:"ok"`
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(b, &out); err != nil || !out.OK || out.ID == "" {
+		return nil
+	}
+	if detach {
+		return nil
+	}
+
+	fmt.Fprintf(os.Stderr, "container %s running — press Ctrl+C to stop\n", out.ID)
+
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(sigCh)
+	<-sigCh
+
+	stopCtx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+	if err := doStopWithContext(stopCtx, socket, out.ID); err != nil {
+		fmt.Fprintf(os.Stderr, "nyx: stop: %v\n", err)
+		return err
+	}
+	fmt.Fprintf(os.Stderr, "stopped %s\n", out.ID)
+	return nil
+}
+
+func doStop(socket, id string) error {
+	return doStopWithContext(context.Background(), socket, id)
+}
+
+func doStopWithContext(ctx context.Context, socket, id string) error {
+	c := httpClient(socket)
+	u := fmt.Sprintf("http://unix/v1/containers/%s/stop", url.PathEscape(id))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, nil)
+	if err != nil {
+		return err
+	}
+	resp, err := c.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("%s: %s", resp.Status, bytes.TrimSpace(body))
+	}
 	return nil
 }
 
@@ -227,7 +292,7 @@ func doExec(socket string, args []string) error {
 
 	c := httpClient(socket)
 	body, _ := json.Marshal(map[string][]string{"argv": argv})
-	u := fmt.Sprintf("http://unix/v1/containers/%s/exec", id)
+	u := fmt.Sprintf("http://unix/v1/containers/%s/exec", url.PathEscape(id))
 	req, err := http.NewRequest(http.MethodPost, u, bytes.NewReader(body))
 	if err != nil {
 		return err

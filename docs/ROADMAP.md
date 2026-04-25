@@ -229,7 +229,7 @@ Legend: `[x]` shipped in tree (still may need polish), `[ ]` not done, `[~]` par
 
 3. **What you should see** — Daemon logs include **`network backend`** with **`driver":"native"`** (unless you set `-net-driver=cni`), then `daemon ready - awaiting workload` and `control API listening` when the socket bound. The process blocks until SIGINT/SIGTERM. See [networking.md](networking.md).
 
-4. **Running a workload** — After **`nyx pull <ref>`**, **`nyx run <ref>`** calls **`POST /v1/containers/run`** (default restart `unless-stopped`). The daemon resolves local image metadata + layer blobs, then **`supervisor.Start`** builds overlay, **networking** (default in-process native), bundle, and **`crun run --detach`**. Use **`nyx exec <id> -- …`** against the returned `id` for one-off commands inside the container.
+4. **Running a workload** — After **`nyx pull <ref>`**, **`nyx run <ref>`** calls **`POST /v1/containers/run`** (default restart `unless-stopped`). The daemon resolves local image metadata + layer blobs, then **`supervisor.Start`** builds overlay, **networking** (default in-process native), bundle, and **`crun run --detach`**. By default the **CLI waits**; **Ctrl+C** calls **`POST /v1/containers/{id}/stop`**. Use **`nyx run -d`** to exit immediately after start, or **`nyx stop <id>`** from another shell. Use **`nyx exec <id> -- …`** for one-off commands inside the container.
 
 5. **Disable the socket** — `sudo ./bin/nyxd -socket="" …` if you do not want the control listener.
 
