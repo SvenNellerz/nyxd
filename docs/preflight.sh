@@ -1,7 +1,12 @@
 #!/bin/bash
 # nyxd-preflight.sh — verify the host is ready to run nyxd.
-# Run as root before first deployment.
+# Run as root before first deployment (Linux only).
 set -euo pipefail
+
+if [ "$(id -u)" -ne 0 ]; then
+  echo "nyxd preflight: must run as root (e.g. sudo bash docs/preflight.sh or sudo make preflight)" >&2
+  exit 1
+fi
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
 ERRORS=0; WARNINGS=0
@@ -20,10 +25,37 @@ echo "════════════════════════�
 echo "  nyxd pre-flight check"
 echo "══════════════════════════════════════"
 
-# ── Root ──────────────────────────────────
+# ── OS & architecture ─────────────────────
 echo ""
-echo "[ Privileges ]"
-if [ "$(id -u)" -eq 0 ]; then pass "running as root"; else fail "must run as root"; fi
+echo "[ OS ]"
+if [ "$(uname -s)" != "Linux" ]; then
+  echo "nyxd preflight: Linux required (found: $(uname -s))" >&2
+  exit 1
+fi
+pass "Linux $(uname -r)"
+ARCH=$(uname -m)
+case "$ARCH" in
+  x86_64|amd64|aarch64|arm64)
+    pass "architecture $ARCH (supported)"
+    ;;
+  armv7l|armv6l)
+    warn "architecture $ARCH — 32-bit ARM is not a primary target; prefer aarch64/ARM64"
+    ;;
+  *)
+    fail "architecture $ARCH not supported (use x86_64/amd64 or aarch64/arm64)"
+    ;;
+esac
+pass "running as root"
+
+# ── Networking (defaults) ─────────────────
+echo ""
+echo "[ Networking ]"
+pass "default is in-process native networking (-net-driver=native); /opt/cni/bin not required"
+if [ -x /opt/cni/bin/bridge ] || [ -x /opt/cni/bin/host-local ]; then
+  warn "CNI plugins under /opt/cni/bin present — only needed for -net-driver=cni, not the default"
+else
+  pass "no external CNI plugins required for default native driver"
+fi
 
 # ── Kernel version ────────────────────────
 echo ""
