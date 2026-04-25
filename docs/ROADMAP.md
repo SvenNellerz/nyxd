@@ -63,6 +63,7 @@ Legend: `[x]` shipped in tree (still may need polish), `[ ]` not done, `[~]` par
 
 - [x] **Public pull + verify** — digest verify on write, atomic rename, bounded concurrency, 4MiB cap on manifest **response** body read (not full layer in RAM during copy).
 - [x] **`ParseRef` / `LoadImageMeta` / `LoadManifest`** — for tooling and unpack helpers.
+- [x] **`PullWithProgress` + streamed pull API** — `POST /v1/images/pull` with `{"stream":true}` returns **`application/x-ndjson`** (phase events + throttled byte progress); **`nyx pull`** uses it by default with progress UI + human summary; **`--json`** keeps the legacy single JSON body.
 
 ---
 
@@ -149,8 +150,8 @@ Legend: `[x]` shipped in tree (still may need polish), `[ ]` not done, `[~]` par
 
 **Yes:** `nyxd` starts an **HTTP server on a Unix domain socket** by default (`-socket=/run/nyxd/nyxd.sock`, override or set `-socket=""` to disable). The **`nyx`** binary is the thin client (`cmd/nyx`).
 
-- [x] **Socket server** — `internal/control`: `GET /v1/ping`, `GET /v1/version`, `GET /v1/containers`, `POST /v1/images/pull`, `POST /v1/containers/run`, `POST /v1/containers/{id}/exec`.
-- [x] **`nyx run`** — `POST /v1/containers/run`: resolves pulled image (`ResolvePulledImage`), builds `ContainerSpec`, **`supervisor.Start`** (overlay + CNI + bundle + `crun run --detach`). Optional `restart` policy in JSON.
+- [x] **Socket server** — `internal/control`: `GET /v1/ping`, `GET /v1/version`, `GET /v1/containers`, `POST /v1/images/pull` (optional NDJSON stream), `POST /v1/containers/run`, `POST /v1/containers/{id}/stop`, `POST /v1/containers/{id}/exec`.
+- [x] **`nyx run` + stop** — `POST /v1/containers/run` then foreground CLI waits; **Ctrl+C** → **`POST /v1/containers/{id}/stop`**; **`nyx run -d`** detach; **`nyx stop`**. Resolves pulled image (`ResolvePulledImage`), builds `ContainerSpec`, **`supervisor.Start`**. Optional `restart` in JSON.
 - [ ] **Auth / TLS** — socket is world-group writable (`0660`); no peer cred check, no token yet (local trust model only).
 - [ ] **Structured errors** — failed `exec` still begins `200` + stream body in some cases; tighten status codes and cap output size.
 
@@ -198,7 +199,7 @@ Legend: `[x]` shipped in tree (still may need polish), `[ ]` not done, `[~]` par
 
 **Done / partial**
 
-- [x] **Small module footprint** — stdlib + `yaml.v3` + `x/sys` + OCI spec packages as declared in `go.mod`.
+- [x] **Small module footprint** — stdlib + `yaml.v3` + `x/sys` + OCI spec packages + **`hedzr/progressbar`** (nyx pull UI only) as in `go.mod`.
 
 ---
 
@@ -242,8 +243,8 @@ Legend: `[x]` shipped in tree (still may need polish), `[ ]` not done, `[~]` par
 3. **Runtime**: `crun events` / pidfd instead of poll-only `WaitForExit`.  
 4. **Registry**: auth + platform + GC + resumable layers.  
 5. **OpenAPI spec** → **SDK samples** → **UI** (document `/v1/*` first).  
-6. **CI + integration tests** on Linux runners with crun + CNI.
+6. **CI + integration tests** on Linux runners with crun + **networking** (native default or CNI when testing `-net-driver=cni`).
 
 ---
 
-*Last reviewed against repository layout on 2026-05-17. Update checkboxes when merging features.*
+*Last reviewed against repository layout on 2026-05-17. **Update `[x]` / `[~]` / `[ ]` when merging features** — keep this file aligned with shipped behavior (CLI flags, API routes, and daemon defaults).*
