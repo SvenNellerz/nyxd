@@ -15,7 +15,9 @@ package native
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
 	"fmt"
 	"log/slog"
 	"net"
@@ -74,6 +76,10 @@ func Setup(ctx context.Context, containerID, netNSPath string, ports []network.P
 
 	// 3. Veth + netns plumbing
 	hostVeth, peerVeth := vethNames(containerID)
+	// Best-effort: drop stale interfaces from a crashed run or older naming that
+	// could leave RTM_NEWLINK failing with EEXIST.
+	_ = deleteLink(hostVeth)
+	_ = deleteLink(peerVeth)
 	if err := createVethPair(hostVeth, peerVeth, log); err != nil {
 		globalIPAM.release(containerID) //nolint:errcheck
 		return "", fmt.Errorf("veth: %w", err)
@@ -828,12 +834,12 @@ func u32ToIP(v uint32) net.IP {
 }
 
 func vethNames(containerID string) (host, peer string) {
-	// Truncate to fit IFNAMSIZ (15 chars).
-	id := containerID
-	if len(id) > 8 {
-		id = id[:8]
-	}
-	return "veth" + id + "h", "veth" + id + "p"
+	// Linux IFNAMSIZ is 16 bytes including NUL — 15 printable chars max.
+	// Hash the full container ID so similar IDs (e.g. two nginx-alpine-* refs
+	// that share an 8-byte prefix) never collide on interface names.
+	sum := sha256.Sum256([]byte(containerID))
+	short := hex.EncodeToString(sum[:4]) // 8 hex chars
+	return "veth" + short + "h", "veth" + short + "p"
 }
 
 func isNotExist(err error) bool {

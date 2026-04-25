@@ -9,16 +9,16 @@ Legend: `[x]` shipped in tree (still may need polish), `[ ]` not done, `[~]` par
 - [x] **OCI runtime shell-out** — `internal/runtime`: `crun` create/start/run (detach)/kill/delete/state/list, state JSON parsing, dedicated `--root` state dir.
 - [x] **Supervisor skeleton** — `internal/supervisor`: `Start` / `Stop` / `Remove` / `Shutdown`, restart policies, overlay + **network.Backend** setup + `bundle.Generate` + `crun run --detach`, supervised restart loop with backoff + jitter.
 - [x] **Image pull (Docker Hub–style)** — `internal/image`: `Store`, anonymous token auth, manifest (+ index) fetch, concurrent layer download with digest verify, atomic blob writes, `ParseRef`, `LoadImageMeta`, `LoadManifest`.
-- [x] **CNI exec path** — `internal/network`: conflist generation, `EnsureNetwork`, `Setup`/`Teardown` via plugin exec, netns under `/run/nyxd/netns`, portable `detachUnmount` for teardown.
+- [x] **CNI exec path (optional)** — `internal/network`: when **`-net-driver=cni`**, conflist generation, `EnsureNetwork`, `Setup`/`Teardown` via plugin exec, netns under `/run/nyxd/netns`, portable `detachUnmount` for teardown. Default daemon mode uses **native** (no `/opt/cni/bin`).
 - [x] **Bundle / OCI config** — `internal/bundle`: `config.json` generation with default caps, masked paths, `noNewPrivileges`, cgroup resource mapping.
 - [x] **Compose subset** — `internal/compose`: real YAML (`gopkg.in/yaml.v3`), image/restart validation, unknown `depends_on` detection, cycle detection, `TopologicalOrder` helper, default `no_new_privileges=true` when unset.
 - [x] **Healthcheck library** — `internal/health`: exec (via `crun exec` + `CommandContext`), HTTP, TCP, retries, `onUnhealthy` callback hook (caller must wire policy).
 - [x] **Logs** — `internal/logs`: JSONL append per container, `Tail` (reads whole file — see gaps).
 - [x] **Telemetry types** — `internal/telemetry`: counters + optional Prometheus-ish HTTP handler (`ServeMetrics`) — **not called from daemon today**.
-- [x] **Daemon entry** — `cmd/nyxd`: wiring for store, overlay, **network backend** (`-net-driver`), runtime, log collector, supervisor; graceful shutdown context (30s); root check; **Unix socket HTTP control API** (`-socket`, default `/run/nyxd/nyxd.sock`); `go.sum` present after `go mod tidy`.
+- [x] **Daemon entry** — `cmd/nyxd`: wiring for store, overlay, **`network.Backend`** (`-net-driver` **native** default or **cni**), runtime, log collector, supervisor; graceful shutdown context (30s); root check; **Unix socket HTTP control API** (`-socket`, default `/run/nyxd/nyxd.sock`); startup log **`network backend`** / **`driver`**; `go.sum` maintained via `go mod tidy`.
 - [x] **`nyx` CLI client** — `cmd/nyx`: `ping`, `version`, `pull` (streamed progress + summary by default, `--json` for single JSON), `run` (foreground: Ctrl+C → stop API; `-d`/`--detach`), `stop`, `exec`; `make build-nyx` → `bin/nyx`.
 - [x] **Unit tests** — compose parser, image ref parsing, native IPAM (Linux build); no end-to-end integration tests.
-- [x] **Docs / packaging** — kernel requirements, **[networking.md](networking.md)** (native vs CNI, `nyx run`/`stop`), native network internals, example service units (`Type=simple` in `packaging/nyxd.service`, `Type=notify` in repo `nyxd.service` without `sd_notify` yet).
+- [x] **Docs / packaging** — [docs/README.md](README.md) index, **INSTALL** / **USAGE**, **OpenAPI**, [networking.md](networking.md), kernel requirements, native network internals, QEMU Alpine guide, example service units (`Type=simple` in `packaging/nyxd.service`, `Type=notify` in repo `nyxd.service` without `sd_notify` yet).
 
 ---
 
@@ -173,7 +173,7 @@ Legend: `[x]` shipped in tree (still may need polish), `[ ]` not done, `[~]` par
 
 ## API, clients & UI
 
-- [ ] **OpenAPI spec** — publish `openapi.yaml` (or JSON) for the control/daemon HTTP API: routes, schemas, auth, errors; use for codegen, docs, and CI contract checks once handlers exist.
+- [x] **OpenAPI spec** — [docs/openapi.yaml](openapi.yaml) documents `GET/POST /v1/*` on the Unix socket (schemas for pull stream, run, stop, exec). Regenerate or extend when handlers change; CI/SDK samples still TBD.
 - [ ] **SDK samples** — small runnable examples (e.g. Go, Python, shell+curl) that call the API for pull, run, status, logs; live under `examples/` or docs and stay in sync with the spec.
 - [ ] **UI** — operator-facing web (or desktop) UI for host/node view, container lifecycle, compose stacks, log tail, and metrics; consumes the same API + optional WebSocket/SSE for streaming.
 
@@ -193,7 +193,7 @@ Legend: `[x]` shipped in tree (still may need polish), `[ ]` not done, `[~]` par
 
 ## General / engineering
 
-- [ ] **CI** — no `.github/workflows` in repo; add lint + `go test` + cross-compile (`GOOS=linux`).
+- [~] **CI** — `.github/workflows/ci.yml`: `go test`, **Trivy** (fs scan), **Grype** (informational `continue-on-error`); expand with `golangci-lint` / cross-build as needed.
 - [ ] **Integration tests** — no crun-in-container tests; only targeted unit tests.
 - [x] **`go.sum`** — committed / maintained via `go mod tidy` (verify in CI).
 
@@ -242,7 +242,7 @@ Legend: `[x]` shipped in tree (still may need polish), `[ ]` not done, `[~]` par
 2. **Supervisor**: integrate **health** + **`TopologicalOrder`** + optional global shutdown budget.  
 3. **Runtime**: `crun events` / pidfd instead of poll-only `WaitForExit`.  
 4. **Registry**: auth + platform + GC + resumable layers.  
-5. **OpenAPI spec** → **SDK samples** → **UI** (document `/v1/*` first).  
+5. **SDK samples** → **UI** (OpenAPI baseline exists in `docs/openapi.yaml`).  
 6. **CI + integration tests** on Linux runners with crun + **networking** (native default or CNI when testing `-net-driver=cni`).
 
 ---

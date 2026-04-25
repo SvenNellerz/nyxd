@@ -116,7 +116,7 @@ sysctl -p /etc/sysctl.d/99-nyxd.conf
 
 Compare: `runc` had **3 critical container-escape CVEs in November 2025 alone**
 (CVE-2025-31133, CVE-2025-52565, CVE-2025-52881). crun's minimal C codebase and
-active security review make it the correct choice for CNI edge nodes.
+active security review make it a solid choice for **small Linux lab hosts** running containers with minimal attack surface.
 
 ### Install
 

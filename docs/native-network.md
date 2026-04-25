@@ -32,8 +32,9 @@ internal/network/native/
 2. globalIPAM.allocate() → atomically assigns next free IP from 10.88.0.0/16
                             file-backed: /var/lib/nyxd/ipam/<hex-ip> → containerID
                             crash-safe: files survive daemon restart
-3. createVethPair()     → RTM_NEWLINK with IFLA_INFO_KIND="veth"
-                            creates vethXXXXh (host) + vethXXXXp (peer)
+3. createVethPair()     → best-effort RTM_DELLINK on computed host/peer names (stale crash recovery),
+                            then RTM_NEWLINK with IFLA_INFO_KIND="veth"; names are a **short hash of the
+                            full container ID** (≤IFNAMSIZ), so distinct IDs never collide on an 8-byte prefix.
 4. attachVethToBridge() → RTM_SETLINK IFLA_MASTER=nyxbr0_index, brings host end up
 5. moveVethToNetNS()    → RTM_NEWLINK IFLA_NET_NS_FD=<netns_fd>
                             renames peer to "eth0" inside the netns
@@ -56,9 +57,9 @@ The IPAM is intentionally simple and crash-safe:
 
 ```
 /var/lib/nyxd/ipam/
-├── 0a580002    → "web-container"      (10.88.0.2)
-├── 0a580003    → "mqtt-broker"        (10.88.0.3)
-└── 0a580004    → "edge-agent"         (10.88.0.4)
+├── 0a580002    → "web-1"              (10.88.0.2)
+├── 0a580003    → "cache-1"            (10.88.0.3)
+└── 0a580004    → "worker-1"           (10.88.0.4)
 ```
 
 - Each file is named by the hex-encoded 32-bit IP address

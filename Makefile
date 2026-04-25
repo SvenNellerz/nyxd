@@ -11,7 +11,7 @@ LDFLAGS  := -w -s \
 	-X main.gitCommit=$(COMMIT) \
 	-X main.buildDate=$(DATE)
 
-.PHONY: all build build-nyx lint vet clean install
+.PHONY: all build build-nyx lint vet clean install scan scan-trivy scan-grype
 
 all: build build-nyx
 
@@ -21,12 +21,13 @@ build:
 build-nyx:
 	CGO_ENABLED=0 go build -trimpath -ldflags "$(LDFLAGS)" -o bin/$(NYX) $(NYX_PKG)
 
-# Static binary for edge nodes (no libc dependency)
+# Static Linux binary (fully linked; useful for minimal rootfs)
 build-static:
 	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
 		go build -trimpath -ldflags "$(LDFLAGS) -extldflags '-static'" \
 		-o bin/$(BINARY)-static $(PACKAGE)
 
+# Cross-compile for arm64 (e.g. Raspberry Pi 64-bit OS)
 build-arm64:
 	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 \
 		go build -trimpath -ldflags "$(LDFLAGS)" \
@@ -40,6 +41,17 @@ lint:
 
 test:
 	go test -race -count=1 ./...
+
+# Vulnerability scans (install Trivy + Grype; see docs/INSTALL.md)
+scan: scan-trivy scan-grype
+
+scan-trivy:
+	@command -v trivy >/dev/null 2>&1 || { echo "install trivy: https://aquasecurity.github.io/trivy/latest/getting-started/installation/"; exit 1; }
+	trivy fs --scanners vuln,secret,misconfig --severity HIGH,CRITICAL --exit-code 0 .
+
+scan-grype:
+	@command -v grype >/dev/null 2>&1 || { echo "install grype: https://github.com/anchore/grype#installation"; exit 1; }
+	grype dir:. --fail-on high
 
 clean:
 	rm -rf bin/

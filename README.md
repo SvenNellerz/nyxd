@@ -1,10 +1,12 @@
 # nyxd
 
-Minimal OCI container orchestrator for NyxOS edge nodes.
+Minimal OCI container orchestrator for **Linux** — aimed at a **home Raspberry Pi lab** (or any small ARM64/x86_64 host) where you want **`crun`** + a tiny control plane without Docker/Podman/containerd.
 
 **Zero Docker. Zero Podman. Zero containerd.**
 
-Uses `crun` as the OCI runtime. **Container networking** defaults to in-process native mode; optional CNI plugins are supported. See **[docs/networking.md](docs/networking.md)** for `-net-driver`, `network.Backend`, the startup log line, `nyxd.service`, and examples.
+Uses `crun` as the OCI runtime. **Networking** defaults to in-process **native** mode; optional **CNI** plugins are supported. See **[docs/networking.md](docs/networking.md)** for `-net-driver`, the startup log line, and `nyx run` / stop behavior.
+
+**Docs index:** **[docs/README.md](docs/README.md)** — install, usage, OpenAPI, QEMU Alpine, kernel notes.
 
 ## Architecture
 
@@ -30,12 +32,7 @@ nyxd
 | CNI plugins | Only if you pass **`-net-driver=cni`** | Static binaries under `/opt/cni/bin` |
 | `nft` | Port NAT rules (native driver) | System `nft` binary |
 
-Go external modules: **2**
-- `github.com/opencontainers/image-spec` - OCI type definitions only
-- `github.com/opencontainers/runtime-spec` - OCI runtime-spec types
-- `golang.org/x/sys` - Linux syscall wrappers
-
-Everything else: **stdlib only**.
+Go modules (see `go.mod`): OCI spec packages, `gopkg.in/yaml.v3`, `golang.org/x/sys`, **`github.com/hedzr/progressbar`** (nyx pull UI), plus transitive deps.
 
 ## Networking (native vs CNI)
 
@@ -49,52 +46,34 @@ Full detail: **[docs/networking.md](docs/networking.md)**.
 ## Build
 
 ```bash
-# Standard
+# Standard (Linux or cross-compiling from your dev machine)
 make build
+make build-nyx
 
-# Static binary for edge nodes (no libc)
+# Static Linux amd64 binary (useful for minimal rootfs)
 make build-static
 
-# Cross-compile for arm64 (Raspberry Pi, Jetson)
+# Cross-compile daemon for Raspberry Pi 64-bit OS
 make build-arm64
 ```
 
-## Install
+## Install and usage
+
+See **[docs/INSTALL.md](docs/INSTALL.md)** (Pi lab, systemd, cross-build) and **[docs/USAGE.md](docs/USAGE.md)** (`nyx` + `curl`).
+
+API contract: **[docs/openapi.yaml](docs/openapi.yaml)**.
+
+## Security scans (repo checkout)
 
 ```bash
-# Install crun
-make install-crun
-
-# Optional: CNI plugins only when using -net-driver=cni
-# make install-cni
-
-# Install daemon
-make install
-
-# Enable systemd service
-cp nyxd.service /etc/systemd/system/
-systemctl daemon-reload
-systemctl enable --now nyxd
+make scan          # Trivy + Grype (tools must be on PATH)
+make scan-trivy
+make scan-grype
 ```
 
-## Usage
+## Try in QEMU first
 
-```bash
-# Pull an image
-nyxd image pull nginx:alpine
-
-# Run a container
-nyxd run --name web nginx:alpine
-
-# Use a compose file
-nyxd compose up -f /etc/nyxd/nyx-compose.yaml
-
-# List containers
-nyxd ps
-
-# Logs
-nyxd logs web --tail 50
-```
+**[docs/qemu-alpine.md](docs/qemu-alpine.md)** and **`scripts/qemu-alpine-nyxd.sh`** — boot **Alpine 3.23** virt media under QEMU before touching your Pi SD card.
 
 ## Security posture
 

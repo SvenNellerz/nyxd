@@ -1,4 +1,4 @@
-// nyxd - minimal OCI container orchestrator for NyxOS.
+// nyxd - minimal OCI container orchestrator (Linux; e.g. Raspberry Pi lab).
 // No Docker, no Podman, no containerd. Just crun + networking + Go.
 package main
 

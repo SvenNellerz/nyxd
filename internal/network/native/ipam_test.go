@@ -129,4 +129,9 @@ func TestVethNames(t *testing.T) {
 			t.Errorf("host and peer names identical: %s", h)
 		}
 	}
+	a, _ := vethNames("nginx-alpine-111111111")
+	b, _ := vethNames("nginx-alpine-222222222")
+	if a == b {
+		t.Errorf("expected different veth host names for distinct ids, got %s", a)
+	}
 }

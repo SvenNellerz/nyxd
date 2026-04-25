@@ -1,5 +1,5 @@
 // Package control exposes a minimal HTTP API over a Unix domain socket for nyxd.
-// The companion CLI is cmd/nyx (binary: nyx). Intended to grow into the OpenAPI-backed surface.
+// The companion CLI is cmd/nyx (binary: nyx). API contract: docs/openapi.yaml.
 package control
 
 import (
