@@ -7,7 +7,7 @@ Legend: `[x]` shipped in tree (still may need polish), `[ ]` not done, `[~]` par
 ## Already in the tree (high level)
 
 - [x] **OCI runtime shell-out** — `internal/runtime`: `crun` create/start/run (detach)/kill/delete/state/list, state JSON parsing, dedicated `--root` state dir.
-- [x] **Supervisor skeleton** — `internal/supervisor`: `Start` / `Stop` / `Remove` / `Shutdown`, restart policies, overlay + CNI setup + `bundle.Generate` + `crun run --detach`, supervised restart loop with backoff.
+- [x] **Supervisor skeleton** — `internal/supervisor`: `Start` / `Stop` / `Remove` / `Shutdown`, restart policies, overlay + **network.Backend** setup + `bundle.Generate` + `crun run --detach`, supervised restart loop with backoff + jitter.
 - [x] **Image pull (Docker Hub–style)** — `internal/image`: `Store`, anonymous token auth, manifest (+ index) fetch, concurrent layer download with digest verify, atomic blob writes, `ParseRef`, `LoadImageMeta`, `LoadManifest`.
 - [x] **CNI exec path** — `internal/network`: conflist generation, `EnsureNetwork`, `Setup`/`Teardown` via plugin exec, netns under `/run/nyxd/netns`, portable `detachUnmount` for teardown.
 - [x] **Bundle / OCI config** — `internal/bundle`: `config.json` generation with default caps, masked paths, `noNewPrivileges`, cgroup resource mapping.
@@ -16,9 +16,9 @@ Legend: `[x]` shipped in tree (still may need polish), `[ ]` not done, `[~]` par
 - [x] **Logs** — `internal/logs`: JSONL append per container, `Tail` (reads whole file — see gaps).
 - [x] **Telemetry types** — `internal/telemetry`: counters + optional Prometheus-ish HTTP handler (`ServeMetrics`) — **not called from daemon today**.
 - [x] **Daemon entry** — `cmd/nyxd`: wiring for store, overlay, **network backend** (`-net-driver`), runtime, log collector, supervisor; graceful shutdown context (30s); root check; **Unix socket HTTP control API** (`-socket`, default `/run/nyxd/nyxd.sock`); `go.sum` present after `go mod tidy`.
-- [x] **`nyx` CLI client** — `cmd/nyx`: `ping`, `version`, `pull`, `run`, `exec`; `make build-nyx` → `bin/nyx`.
+- [x] **`nyx` CLI client** — `cmd/nyx`: `ping`, `version`, `pull` (streamed progress + summary by default, `--json` for single JSON), `run` (foreground: Ctrl+C → stop API; `-d`/`--detach`), `stop`, `exec`; `make build-nyx` → `bin/nyx`.
 - [x] **Unit tests** — compose parser, image ref parsing, native IPAM (Linux build); no end-to-end integration tests.
-- [x] **Docs / packaging** — kernel requirements, native network notes, example service units (`Type=simple` in `packaging/nyxd.service`, `Type=notify` in repo `nyxd.service` without `sd_notify` yet).
+- [x] **Docs / packaging** — kernel requirements, **[networking.md](networking.md)** (native vs CNI, `nyx run`/`stop`), native network internals, example service units (`Type=simple` in `packaging/nyxd.service`, `Type=notify` in repo `nyxd.service` without `sd_notify` yet).
 
 ---
 
@@ -46,7 +46,7 @@ Legend: `[x]` shipped in tree (still may need polish), `[ ]` not done, `[~]` par
 **Done / partial**
 
 - [x] **Restart policies** — always / on-failure / unless-stopped / never + `MaxRestarts` gate.
-- [x] **Basic backoff** — between restart attempts (no jitter).
+- [x] **Backoff between restarts** — exponential delay capped at 30s **with jitter** (`math/rand/v2`).
 - [x] **`Healthcheck` on spec** — field on `ContainerSpec` for future wiring.
 
 ---
