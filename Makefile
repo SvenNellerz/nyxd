@@ -27,7 +27,7 @@ build-static:
 		go build -trimpath -ldflags "$(LDFLAGS) -extldflags '-static'" \
 		-o bin/$(BINARY)-static $(PACKAGE)
 
-# Cross-compile for arm64 (e.g. Raspberry Pi 64-bit OS)
+# Cross-compile for Linux arm64 (e.g. Raspberry Pi 64-bit, other aarch64 hosts)
 build-arm64:
 	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 \
 		go build -trimpath -ldflags "$(LDFLAGS)" \
@@ -82,8 +82,7 @@ setup-kernel:
 	@echo "Loading kernel modules..."
 	modprobe overlay bridge veth br_netfilter \
 		ip_tables iptable_nat iptable_filter \
-		nf_nat nf_conntrack nft_masq nft_nat nft_chain_nat \
-		seccomp
+		nf_nat nf_conntrack nft_masq nft_nat nft_chain_nat
 	@echo "Applying sysctls..."
 	sysctl -p /etc/sysctl.d/99-nyxd.conf || \
 		sysctl net.ipv4.ip_forward=1 net.bridge.bridge-nf-call-iptables=1

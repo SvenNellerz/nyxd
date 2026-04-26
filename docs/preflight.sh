@@ -75,7 +75,7 @@ fi
 # ── Kernel modules ────────────────────────
 echo ""
 echo "[ Kernel modules ]"
-REQUIRED_MODS="overlay bridge veth br_netfilter ip_tables iptable_nat nf_nat nf_conntrack seccomp"
+REQUIRED_MODS="overlay bridge veth br_netfilter ip_tables iptable_nat nf_nat nf_conntrack"
 for mod in $REQUIRED_MODS; do
   if modinfo "$mod" &>/dev/null || lsmod | grep -q "^${mod} "; then
     pass "$mod"
@@ -83,6 +83,16 @@ for mod in $REQUIRED_MODS; do
     fail "$mod not available (run: modprobe $mod)"
   fi
 done
+
+# Seccomp is a built-in kernel facility (CONFIG_SECCOMP_FILTER), not a loadable module
+# named "seccomp" — modprobe seccomp fails on typical distros even when crun works fine.
+echo ""
+echo "[ Seccomp ]"
+if [ -r /proc/sys/kernel/seccomp/actions_avail ] && [ -s /proc/sys/kernel/seccomp/actions_avail ]; then
+  pass "seccomp BPF available (kernel built-in; not a .ko module)"
+else
+  fail "seccomp BPF unavailable — need CONFIG_SECCOMP_FILTER (expected on 5.11+)"
+fi
 
 # nft modules (warn not fail — kernel may have them built-in)
 NFT_MODS="nft_masq nft_nat nft_chain_nat"

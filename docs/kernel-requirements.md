@@ -37,9 +37,14 @@ nf_conntrack
 nft_masq
 nft_nat
 nft_chain_nat
+```
 
-# crun security enforcement
-seccomp
+Seccomp / Seccomp BPF are **built into the kernel** (`CONFIG_SECCOMP`, `CONFIG_SECCOMP_FILTER`). There is **no** loadable module named `seccomp`; `modprobe seccomp` is wrong on typical kernels. crun still applies seccomp profiles via the prctl/seccomp syscalls when those options are enabled.
+
+Verify after boot:
+
+```bash
+test -r /proc/sys/kernel/seccomp/actions_avail && cat /proc/sys/kernel/seccomp/actions_avail
 ```
 
 Load immediately (without rebooting):
@@ -47,14 +52,13 @@ Load immediately (without rebooting):
 ```bash
 modprobe overlay bridge veth br_netfilter \
          ip_tables iptable_nat iptable_filter \
-         nf_nat nf_conntrack nft_masq nft_nat nft_chain_nat \
-         seccomp
+         nf_nat nf_conntrack nft_masq nft_nat nft_chain_nat
 ```
 
-Verify all loaded:
+Verify loadable modules (seccomp will not appear — it is not a module):
 
 ```bash
-lsmod | grep -E 'overlay|bridge|veth|br_netfilter|ip_tables|nf_nat|nf_conntrack|nft|seccomp'
+lsmod | grep -E 'overlay|bridge|veth|br_netfilter|ip_tables|nf_nat|nf_conntrack|nft'
 ```
 
 ---
@@ -218,9 +222,13 @@ check "kernel >= 5.11" test "$KVER" -ge 511
 
 echo ""
 echo "[ Kernel modules ]"
-for mod in overlay bridge veth br_netfilter ip_tables iptable_nat nf_nat nf_conntrack seccomp; do
+for mod in overlay bridge veth br_netfilter ip_tables iptable_nat nf_nat nf_conntrack; do
   check "$mod loaded" modinfo "$mod"
 done
+
+echo ""
+echo "[ Seccomp ]"
+check "seccomp BPF (actions_avail)" test -r /proc/sys/kernel/seccomp/actions_avail
 
 echo ""
 echo "[ sysctls ]"

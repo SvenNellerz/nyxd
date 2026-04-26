@@ -1,6 +1,6 @@
 # QEMU + Alpine 3.23 for nyxd hacking
 
-Use a small **Alpine Linux 3.23** VM when you want to try **nyxd** on your laptop (x86_64) or emulate **aarch64** before deploying to a **Raspberry Pi** in your lab.
+Use a small **Alpine Linux 3.23** VM when you want to try **nyxd** on your laptop (x86_64) or exercise **aarch64** under QEMU before deploying to bare metal or an ARM board (e.g. a Raspberry Pi).
 
 ## Why Alpine virt ISO?
 
@@ -26,7 +26,7 @@ Adjust ISO path, `-machine accel=tcg` if KVM is unavailable (e.g. macOS without 
 
 3. Inside Alpine, install Go, crun, git, build **nyxd** from this repo, and run the daemon as root (same flow as [INSTALL.md](INSTALL.md)).
 
-## aarch64 (Pi-like guest on a PC)
+## aarch64 (ARM64 guest on a PC)
 
 Use **`qemu-system-aarch64`** with a **virt** machine and a **3.23** aarch64 ISO from [releases/aarch64](https://dl-cdn.alpinelinux.org/alpine/v3.23/releases/aarch64/). You will need a firmware blob (e.g. **edk2** UEFI package for QEMU) depending on your distro—consult your OS QEMU docs.
 

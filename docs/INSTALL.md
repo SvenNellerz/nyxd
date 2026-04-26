@@ -1,21 +1,23 @@
-# Installing nyxd for a Raspberry Pi lab
+# Installing nyxd on Linux
 
-This guide targets a **small home lab** (one or more Raspberry Pis, or similar ARM64 Linux boards) where you run **nyxd** as the container daemon and **nyx** on the same host (or from your laptop against the socket).
+**nyxd** runs on **any** Linux host that meets the kernel and tooling requirements below (desktop, VM, VPS, edge box, ARM or x86). It was first written for a home **Raspberry Pi** so containers could run without Docker or a heavy daemon; that same footprint applies everywhere you want a minimal stack.
+
+Typical setups: run **nyxd** on the host and **nyx** locally, or call the Unix-socket HTTP API from another machine you trust.
 
 ## What you need on each Linux host
 
 | Requirement | Notes |
 |-------------|--------|
-| **Linux** with **overlayfs**, **namespaces**, **cgroups** | Raspberry Pi OS 64-bit, Debian, Fedora ARM, etc. |
+| **Linux** with **overlayfs**, **namespaces**, **cgroups** | Debian, Fedora, Ubuntu, Raspberry Pi OS 64-bit, cloud images, etc. |
 | **Root** for `nyxd` | Overlay, netns, and crun state require root today. |
 | **crun** | `apt install crun`, `dnf install crun`, or build from source. |
 | **Kernel modules** | See [kernel-requirements.md](kernel-requirements.md) — `overlay`, `bridge`, `veth`, `br_netfilter`, nftables NAT, etc. |
 | **nft** (optional but recommended) | Used for port maps with the **native** network driver. |
-| **Go 1.22+** (build only) | On the Pi or cross-compile from your PC. |
+| **Go 1.22+** (build only) | On the target host or cross-compile from a dev machine. |
 
 Networking defaults to **`-net-driver=native`** (no `/opt/cni/bin`). See [networking.md](networking.md).
 
-## Build on the Pi
+## Build on the target host
 
 ```bash
 git clone https://github.com/zrougamed/nyxd.git
@@ -24,12 +26,12 @@ make build build-nyx
 sudo install -m 755 bin/nyxd bin/nyx /usr/local/bin/
 ```
 
-## Cross-compile on an x86_64 PC
+## Cross-compile (e.g. arm64 from x86_64)
 
 ```bash
 make build-arm64
-# copy bin/nyxd-arm64 to the Pi as /usr/local/bin/nyxd (rename if you like)
-scp bin/nyxd-arm64 pi:/tmp/nyxd && ssh pi 'sudo install -m 755 /tmp/nyxd /usr/local/bin/nyxd'
+# Example: copy to an arm64 host (replace user/hostname/path)
+scp bin/nyxd-arm64 myarm64:/tmp/nyxd && ssh myarm64 'sudo install -m 755 /tmp/nyxd /usr/local/bin/nyxd'
 ```
 
 Build the **nyx** client for `GOOS=linux GOARCH=arm64` the same way (add a Makefile target if you want both binaries in one shot).

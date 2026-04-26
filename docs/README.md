@@ -2,7 +2,7 @@
 
 | Doc | Purpose |
 |-----|---------|
-| [INSTALL.md](INSTALL.md) | Raspberry Pi lab install, cross-build, systemd |
+| [INSTALL.md](INSTALL.md) | Linux install, systemd, cross-build |
 | [USAGE.md](USAGE.md) | `nyx` CLI and `curl` examples |
 | [openapi.yaml](openapi.yaml) | Control HTTP API (Unix socket) — OpenAPI 3 |
 | [networking.md](networking.md) | Native vs CNI, flags, `nyx run` / stop |

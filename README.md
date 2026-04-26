@@ -1,6 +1,6 @@
 # nyxd
 
-Minimal OCI container orchestrator for **Linux** — aimed at a **home Raspberry Pi lab** (or any small ARM64/x86_64 host) where you want **`crun`** + a tiny control plane without Docker/Podman/containerd.
+Minimal OCI container orchestrator for **Linux** (x86_64, arm64, and similar) — **`crun`** plus a small control plane, no Docker/Podman/containerd. It started as a lightweight way to run containers on a home **Raspberry Pi** without a heavy stack; the same design runs on **any** capable Linux host (VPS, laptop, edge box, lab VM).
 
 **Zero Docker. Zero Podman. Zero containerd.**
 
@@ -53,13 +53,13 @@ make build-nyx
 # Static Linux amd64 binary (useful for minimal rootfs)
 make build-static
 
-# Cross-compile daemon for Raspberry Pi 64-bit OS
+# Cross-compile daemon for Linux arm64 (e.g. Raspberry Pi 64-bit, Graviton)
 make build-arm64
 ```
 
 ## Install and usage
 
-See **[docs/INSTALL.md](docs/INSTALL.md)** (Pi lab, systemd, cross-build) and **[docs/USAGE.md](docs/USAGE.md)** (`nyx` + `curl`).
+See **[docs/INSTALL.md](docs/INSTALL.md)** (Linux install, systemd, cross-build) and **[docs/USAGE.md](docs/USAGE.md)** (`nyx` + `curl`).
 
 API contract: **[docs/openapi.yaml](docs/openapi.yaml)**.
 
@@ -73,7 +73,7 @@ make scan-grype
 
 ## Try in QEMU first
 
-**[docs/qemu-alpine.md](docs/qemu-alpine.md)** and **`scripts/qemu-alpine-nyxd.sh`** — boot **Alpine 3.23** virt media under QEMU before touching your Pi SD card.
+**[docs/qemu-alpine.md](docs/qemu-alpine.md)** and **`scripts/qemu-alpine-nyxd.sh`** — boot **Alpine 3.23** virt media under QEMU to try nyxd safely before bare metal (e.g. an SBC SD card).
 
 ## Security posture
 

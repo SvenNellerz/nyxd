@@ -60,6 +60,6 @@ curl -sS --unix-socket "$SOCK" -H 'Content-Type: application/json' \
 
 ## Related docs
 
-- [INSTALL.md](INSTALL.md) — Raspberry Pi lab install  
+- [INSTALL.md](INSTALL.md) — Linux install  
 - [networking.md](networking.md) — networking flags and behavior  
 - [kernel-requirements.md](kernel-requirements.md) — modules and sysctl  
