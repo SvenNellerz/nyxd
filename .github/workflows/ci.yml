@@ -1,6 +1,14 @@
 name: CI
 
-on: [push, pull_request]
+on:
+  push:
+    branches:
+      - "**"
+  pull_request:
+  workflow_call:
+
+permissions:
+  contents: read
 
 jobs:
   go:
@@ -11,11 +19,16 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+          cache: true
 
-      - name: Vet and test
-        run: |
-          make vet
-          go test -count=1 ./...
+      - name: Vet
+        run: make vet
+
+      - name: Test
+        run: make test
+
+      - name: Build binaries
+        run: make build build-nyx
 
       - name: Trivy filesystem scan
         uses: aquasecurity/trivy-action@0.28.0

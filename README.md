@@ -1,5 +1,8 @@
 # nyxd
 
+[![CI](https://github.com/zrougamed/nyxd/actions/workflows/ci.yml/badge.svg)](https://github.com/zrougamed/nyxd/actions/workflows/ci.yml)
+[![Release](https://github.com/zrougamed/nyxd/actions/workflows/release.yml/badge.svg)](https://github.com/zrougamed/nyxd/actions/workflows/release.yml)
+
 Minimal OCI container orchestrator for **Linux** (x86_64, arm64, and similar) — **`crun`** plus a small control plane, no Docker/Podman/containerd. It started as a lightweight way to run containers on a home **Raspberry Pi** without a heavy stack; the same design runs on **any** capable Linux host (VPS, laptop, edge box, lab VM).
 
 **Zero Docker. Zero Podman. Zero containerd.**
@@ -56,6 +59,10 @@ make build-static
 # Cross-compile daemon for Linux arm64 (e.g. Raspberry Pi 64-bit, Graviton)
 make build-arm64
 ```
+
+## Releases (GitHub Actions)
+
+Create a tag whose name starts with `v` (for example `v0.2.0`) and push it to GitHub. The **Release** workflow runs the same checks as **CI**, then publishes a GitHub Release with `nyxd` and `nyx` binaries for **linux/amd64** and **linux/arm64**, plus `sha256` sidecars.
 
 ## Install and usage
 

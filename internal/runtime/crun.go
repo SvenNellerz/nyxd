@@ -148,14 +148,56 @@ func (r *Runtime) WaitForExit(ctx context.Context, containerID string) (int, err
 		case <-ticker.C:
 			s, err := r.State(ctx, containerID)
 			if err != nil {
-				// Container deleted = stopped.
-				return -1, nil
+				// Only treat as exit if crun no longer has this id (e.g. after delete).
+				// Transient state errors must not tear down a still-running container.
+				if isCrunNotFound(err) {
+					return -1, nil
+				}
+				continue
 			}
 			if s.Status == "stopped" {
 				return r.resolveExitCode(ctx, containerID, s), nil
 			}
 		}
 	}
+}
+
+// WaitStopped blocks until crun reports status "stopped" or the container id
+// disappears from crun (fully removed). Used after kill so callers do not
+// assume the process is gone while the runtime still reports "running".
+func (r *Runtime) WaitStopped(ctx context.Context, containerID string) error {
+	ticker := time.NewTicker(200 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+			s, err := r.State(ctx, containerID)
+			if err != nil {
+				if isCrunNotFound(err) {
+					return nil
+				}
+				continue
+			}
+			if s.Status == "stopped" {
+				return nil
+			}
+		}
+	}
+}
+
+func isCrunNotFound(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "not found") ||
+		strings.Contains(msg, "cannot find") ||
+		strings.Contains(msg, "could not find") ||
+		strings.Contains(msg, "does not exist") ||
+		strings.Contains(msg, "no such container") ||
+		strings.Contains(msg, "unable to find")
 }
 
 func (r *Runtime) resolveExitCode(ctx context.Context, containerID string, s *State) int {

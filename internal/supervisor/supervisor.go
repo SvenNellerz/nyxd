@@ -133,10 +133,11 @@ func (s *Supervisor) Stop(ctx context.Context, id string) error {
 
 	timeout := entry.spec.StopTimeout
 	if timeout == 0 {
-		timeout = 10 * time.Second
+		timeout = 30 * time.Second
 	}
-
-	stopCtx, cancel := context.WithTimeout(ctx, timeout)
+	// Do not tie kill+wait to the HTTP request context: the client may cancel
+	// as soon as the response is written, which would abort crun before teardown.
+	stopCtx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
 	sig := "TERM"
@@ -146,7 +147,16 @@ func (s *Supervisor) Stop(ctx context.Context, id string) error {
 
 	if err := s.rt.Kill(stopCtx, id, sig); err != nil {
 		s.log.Warn("graceful stop failed, forcing", "id", id, "err", err)
-		s.rt.Kill(ctx, id, "KILL") //nolint:errcheck
+		if err2 := s.rt.Kill(stopCtx, id, "KILL"); err2 != nil {
+			entry.mu.Lock()
+			entry.stopped = false
+			entry.mu.Unlock()
+			return fmt.Errorf("kill container: %w", err2)
+		}
+	}
+
+	if err := s.rt.WaitStopped(stopCtx, id); err != nil {
+		return fmt.Errorf("wait container stopped: %w", err)
 	}
 
 	return nil
