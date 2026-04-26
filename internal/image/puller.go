@@ -9,9 +9,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -213,6 +215,50 @@ func (s *Store) ResolvePulledImage(ref string) (*oci.Manifest, *oci.ImageConfig,
 		paths = append(paths, p)
 	}
 	return m, cfg, paths, nil
+}
+
+// ListImageRefs returns pulled image references (repo:tag) discovered on disk.
+func (s *Store) ListImageRefs() ([]string, error) {
+	imagesRoot := filepath.Join(s.root, "images")
+	var out []string
+	err := filepath.WalkDir(imagesRoot, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return nil
+		}
+		if d.Name() != "manifest.json" {
+			return nil
+		}
+		rel, err := filepath.Rel(imagesRoot, filepath.Dir(path))
+		if err != nil {
+			return nil
+		}
+		segs := strings.Split(rel, string(filepath.Separator))
+		if len(segs) < 2 {
+			return nil
+		}
+		tag := segs[len(segs)-1]
+		repo := strings.Join(segs[:len(segs)-1], "/")
+		out = append(out, repo+":"+tag)
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+// RemoveImage deletes local metadata for ref (manifest + config). Blobs are left in the content store.
+func (s *Store) RemoveImage(ref string) error {
+	if _, _, err := s.LoadImageMeta(ref); err != nil {
+		return err
+	}
+	_, repo, tag := parseRef(ref)
+	dir := filepath.Join(s.root, "images", sanitisePath(repo), sanitisePath(tag))
+	if err := os.RemoveAll(dir); err != nil {
+		return fmt.Errorf("remove image dir: %w", err)
+	}
+	return nil
 }
 
 // pullLayers fetches all layers with bounded concurrency.

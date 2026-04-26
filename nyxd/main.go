@@ -101,14 +101,14 @@ func run(ctx context.Context, cfg Config, logger *slog.Logger) error {
 		return fmt.Errorf("runtime: %w", err)
 	}
 
-	_, err = logs.NewCollector(cfg.BaseDir+"/logs", logger)
+	logColl, err := logs.NewCollector(cfg.BaseDir+"/logs", logger)
 	if err != nil {
 		return fmt.Errorf("log collector: %w", err)
 	}
 
-	sup := supervisor.New(rt, ovl, net, cfg.BaseDir, logger)
+	sup := supervisor.New(rt, ovl, net, cfg.BaseDir, logger, logColl)
 
-	ctl := control.New(logger, rt, imgStore, sup, ctx, nil, version, gitCommit, buildDate, cfg.Socket)
+	ctl := control.New(logger, rt, imgStore, sup, ctx, nil, version, gitCommit, buildDate, cfg.BaseDir, cfg.Socket)
 	if err := ctl.Start(); err != nil {
 		logger.Warn("control API not started", "err", err)
 	} else {

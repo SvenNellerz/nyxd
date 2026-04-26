@@ -70,6 +70,10 @@ func run(args []string) error {
 		return doPS(socket, args[1:])
 	case "rm":
 		return doRM(socket, args[1:])
+	case "logs":
+		return doLogs(socket, args[1:])
+	case "image":
+		return doImage(socket, args[1:])
 	case "container":
 		return doContainer(socket, args[1:])
 	case "stop":
@@ -91,16 +95,20 @@ Commands:
   ping              GET /v1/ping
   version           GET /v1/version
   pull [--json] <ref>   streamed progress + summary (use --json for raw JSON)
-  run [docker flags] <image> [-- <argv...>]   start container (foreground: Ctrl+C stops)
+  run [docker flags] <image> [-- <argv...>]   start container
+      Foreground (no -d): stream container logs; Ctrl+C sends SIGKILL.
       Docker-style flags:
         -p, --publish HOST:CONTAINER[/tcp|/udp]   (repeatable; e.g. -p 8080:80)
         -e, --env KEY=VAL                       (repeatable)
         --name <id>   -d, --detach   --hostname <h>   --restart <policy>
         -h <hostname>   (same as docker run -h; use "nyx --help" for nyx help)
   ps [-q] [--no-trunc]     list containers (docker-style table)
+  logs [-f] [--tail N] [-n N] <id>   container logs (GET /v1/containers/{id}/logs)
   stop <id> [<id>...]      stop one or more containers
   rm <id> [<id>...]        remove container(s) (POST /v1/containers/{id}/remove)
-  container <ls|list|rm>   aliases for ps / rm
+  image ls                 list pulled image refs
+  image rm <ref> [<ref>...]   remove image metadata (POST /v1/images/remove)
+  container <ls|list|rm|logs>   aliases for ps / rm / logs
   exec [-i] [-t] <id> [--] <argv...>   exec in container (-i/-t accepted; no TTY attach)
 
 Environment:
@@ -211,25 +219,54 @@ func doRun(socket string, args []string) error {
 		return nil
 	}
 
-	fmt.Fprintf(os.Stderr, "container %s running — press Ctrl+C to stop\n", out.ID)
+	logCtx, logCancel := context.WithCancel(context.Background())
+	defer logCancel()
+	go func() {
+		if err := streamContainerLogs(logCtx, socket, out.ID, os.Stdout); err != nil && logCtx.Err() == nil {
+			fmt.Fprintf(os.Stderr, "nyx: log stream: %v\n", err)
+		}
+	}()
+	fmt.Fprintf(os.Stderr, "container %s — streaming logs; Ctrl+C sends SIGKILL\n", out.ID)
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
 	defer signal.Stop(sigCh)
 	<-sigCh
 
-	stopCtx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	logCancel()
+	killCtx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
-	if err := doStopWithContext(stopCtx, socket, out.ID); err != nil {
-		fmt.Fprintf(os.Stderr, "nyx: stop: %v\n", err)
+	if err := doKillWithContext(killCtx, socket, out.ID); err != nil {
+		fmt.Fprintf(os.Stderr, "nyx: kill: %v\n", err)
 		return err
 	}
-	fmt.Fprintf(os.Stderr, "stopped %s\n", out.ID)
+	fmt.Fprintf(os.Stderr, "SIGKILL sent to %s\n", out.ID)
 	return nil
 }
 
 func doStop(socket, id string) error {
 	return doStopWithContext(context.Background(), socket, id)
+}
+
+func doKillWithContext(ctx context.Context, socket, id string) error {
+	c := httpClient(socket)
+	raw, _ := json.Marshal(map[string]string{"signal": "KILL"})
+	u := fmt.Sprintf("http://unix/v1/containers/%s/kill", url.PathEscape(id))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, bytes.NewReader(raw))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := c.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("%s: %s", resp.Status, bytes.TrimSpace(body))
+	}
+	return nil
 }
 
 func doStopWithContext(ctx context.Context, socket, id string) error {

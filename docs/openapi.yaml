@@ -30,7 +30,7 @@ tags:
   - name: system
     description: Health and version
   - name: images
-    description: Image pull
+    description: Image pull, list, and remove
   - name: containers
     description: Container lifecycle and exec
 
@@ -238,6 +238,127 @@ paths:
         "503":
           description: Runtime unavailable
 
+  /v1/containers/{id}/kill:
+    post:
+      tags: [containers]
+      summary: Send a signal to a container (default SIGKILL)
+      description: |
+        Optional JSON body `{"signal":"KILL"}` (or `SIGKILL`). Used by foreground `nyx run` on Ctrl+C.
+      operationId: killContainer
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                signal:
+                  type: string
+                  description: Signal name without or with `SIG` prefix (e.g. `KILL`, `SIGTERM`).
+      responses:
+        "200":
+          description: Kill accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/KillResponse"
+        "400":
+          description: Bad request
+        "404":
+          description: Container not found
+        "503":
+          description: Supervisor unavailable
+
+  /v1/containers/{id}/logs:
+    get:
+      tags: [containers]
+      summary: Container stdout/stderr log file
+      description: |
+        Reads `logs/{id}.log` under the daemon data directory. With `plain=1` (default), JSONL
+        lines are decoded to plain text. With `follow=1`, new lines are streamed until the client disconnects.
+      operationId: containerLogs
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: tail
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 99999
+          description: Number of trailing lines to send first (default 200).
+        - name: follow
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: ["1", "true", ""]
+        - name: plain
+          in: query
+          required: false
+          schema:
+            type: string
+          description: When not `0`, decode JSONL log entries to text (default on).
+      responses:
+        "200":
+          description: Plain text log stream (or snapshot when not following)
+          content:
+            text/plain:
+              schema:
+                type: string
+        "404":
+          description: No log file for this container
+        "500":
+          description: Read error
+
+  /v1/images:
+    get:
+      tags: [images]
+      summary: List locally stored image references
+      operationId: listImages
+      responses:
+        "200":
+          description: Image ref list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImagesListResponse"
+        "503":
+          description: Image store not configured
+
+  /v1/images/remove:
+    post:
+      tags: [images]
+      summary: Remove local image metadata for a ref
+      operationId: removeImage
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ImageRemoveRequest"
+      responses:
+        "200":
+          description: Removed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImageRemoveResponse"
+        "400":
+          description: Bad request
+        "503":
+          description: Image store not configured
+
 components:
   schemas:
     PingResponse:
@@ -305,6 +426,43 @@ components:
         ok:
           type: boolean
         id:
+          type: string
+
+    KillResponse:
+      type: object
+      required: [ok, id, signal]
+      properties:
+        ok:
+          type: boolean
+        id:
+          type: string
+        signal:
+          type: string
+          example: KILL
+
+    ImagesListResponse:
+      type: object
+      required: [images]
+      properties:
+        images:
+          type: array
+          items:
+            type: string
+
+    ImageRemoveRequest:
+      type: object
+      required: [ref]
+      properties:
+        ref:
+          type: string
+
+    ImageRemoveResponse:
+      type: object
+      required: [ok, ref]
+      properties:
+        ok:
+          type: boolean
+        ref:
           type: string
 
     PullRequest:

@@ -172,20 +172,16 @@ func (s *Supervisor) Stop(ctx context.Context, id string) error {
 
 // Kill sends a signal (default KILL) and waits for crun to report stopped.
 // Sets stopped=true so restart policies do not respawn the container.
-func (s *Supervisor) Kill(ctx context.Context, id string, signal string) error {
+func (s *Supervisor) Kill(_ context.Context, id string, signal string) error {
 	if signal == "" {
 		signal = "KILL"
 	}
 	s.mu.RLock()
-	_, ok := s.containers[id]
+	entry, ok := s.containers[id]
 	s.mu.RUnlock()
 	if !ok {
 		return fmt.Errorf("container %s not found", id)
 	}
-
-	s.mu.RLock()
-	entry := s.containers[id]
-	s.mu.RUnlock()
 
 	entry.mu.Lock()
 	entry.stopped = true
@@ -279,6 +275,9 @@ func (s *Supervisor) ListInfo(ctx context.Context) []ContainerInfo {
 	return out
 }
 
+// BaseDir returns the daemon data directory (e.g. /var/lib/nyxd).
+func (s *Supervisor) BaseDir() string { return s.baseDir }
+
 // Shutdown stops all containers gracefully.
 func (s *Supervisor) Shutdown(ctx context.Context) {
 	s.mu.RLock()
@@ -355,15 +354,89 @@ func (s *Supervisor) startOnce(ctx context.Context, e *containerEntry) error {
 	}
 	e.bundleDir = bundleDir
 
-	// 4. crun run --detach.
-	if err := s.rt.Run(ctx, spec.ID, bundleDir); err != nil {
+	// 4. crun run (foreground): stdio piped to log collector JSONL files.
+	e.mu.Lock()
+	if e.logCancel != nil {
+		e.logCancel()
+		e.logCancel = nil
+	}
+	logCtx, logCancel := context.WithCancel(ctx)
+	e.logCancel = logCancel
+	e.mu.Unlock()
+
+	soR, soW, err := os.Pipe()
+	if err != nil {
+		logCancel()
 		s.teardownNetwork(ctx, spec.ID)
 		s.ovl.Remove(spec.ID) //nolint:errcheck
-		return fmt.Errorf("crun run: %w", err)
+		return fmt.Errorf("stdio pipe: %w", err)
+	}
+	seR, seW, err := os.Pipe()
+	if err != nil {
+		_ = soR.Close()
+		_ = soW.Close()
+		logCancel()
+		s.teardownNetwork(ctx, spec.ID)
+		s.ovl.Remove(spec.ID) //nolint:errcheck
+		return fmt.Errorf("stdio pipe: %w", err)
 	}
 
-	log.Info("container started", "image", spec.Image, "ip", ip)
-	return nil
+	if s.logColl != nil {
+		go func() {
+			defer soR.Close()
+			s.logColl.Stream(logCtx, spec.ID, "stdout", soR)
+		}()
+		go func() {
+			defer seR.Close()
+			s.logColl.Stream(logCtx, spec.ID, "stderr", seR)
+		}()
+	} else {
+		go func() {
+			defer soR.Close()
+			_, _ = io.Copy(io.Discard, soR)
+		}()
+		go func() {
+			defer seR.Close()
+			_, _ = io.Copy(io.Discard, seR)
+		}()
+	}
+
+	runErr := make(chan error, 1)
+	go func() {
+		defer soW.Close()
+		defer seW.Close()
+		runErr <- s.rt.RunForeground(logCtx, spec.ID, bundleDir, soW, seW)
+	}()
+
+	startDeadline := time.NewTimer(30 * time.Second)
+	defer startDeadline.Stop()
+	tick := time.NewTicker(40 * time.Millisecond)
+	defer tick.Stop()
+
+	for {
+		select {
+		case err := <-runErr:
+			if err != nil {
+				logCancel()
+				s.teardownNetwork(ctx, spec.ID)
+				s.ovl.Remove(spec.ID) //nolint:errcheck
+				return fmt.Errorf("crun run: %w", err)
+			}
+			log.Info("container started", "image", spec.Image, "ip", ip)
+			return nil
+		case <-tick.C:
+			st, err2 := s.rt.State(ctx, spec.ID)
+			if err2 == nil && st != nil && st.Status == "running" {
+				log.Info("container started", "image", spec.Image, "ip", ip)
+				return nil
+			}
+		case <-startDeadline.C:
+			logCancel()
+			s.teardownNetwork(ctx, spec.ID)
+			s.ovl.Remove(spec.ID) //nolint:errcheck
+			return fmt.Errorf("crun run: timeout waiting for running state")
+		}
+	}
 }
 
 // supervise watches a container and applies restart policy.
@@ -387,6 +460,8 @@ func (s *Supervisor) supervise(ctx context.Context, e *containerEntry) {
 		e.mu.Unlock()
 
 		log.Info("container exited", "exitCode", exitCode, "intentional", intentionallyStopped)
+
+		s.resetLogIO(e)
 
 		// Cleanup network + overlay.
 		s.teardownNetwork(ctx, e.spec.ID)
@@ -460,11 +535,25 @@ func (s *Supervisor) teardownNetwork(ctx context.Context, id string) {
 }
 
 func (s *Supervisor) cleanup(e *containerEntry) {
+	s.resetLogIO(e)
+	if s.logColl != nil {
+		s.logColl.Remove(e.spec.ID)
+	}
 	if e.netNS != "" {
 		s.net.Teardown(context.Background(), e.spec.ID, e.netNS) //nolint:errcheck
 		network.DeleteNetNS(e.spec.ID)                           //nolint:errcheck
 	}
 	s.ovl.Remove(e.spec.ID) //nolint:errcheck
+}
+
+func (s *Supervisor) resetLogIO(e *containerEntry) {
+	e.mu.Lock()
+	c := e.logCancel
+	e.logCancel = nil
+	e.mu.Unlock()
+	if c != nil {
+		c()
+	}
 }
 
 // backoff returns an exponential backoff delay capped at 30s, with small jitter.

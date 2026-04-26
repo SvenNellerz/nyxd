@@ -11,7 +11,7 @@ nyx version
 # Pull (progress UI on stderr; add --json for a single JSON blob on stdout)
 sudo nyx pull nginx:alpine
 
-# Run — waits; Ctrl+C stops the container (POST /v1/containers/{id}/stop)
+# Run — foreground streams container logs; Ctrl+C sends SIGKILL (POST /v1/containers/{id}/kill)
 sudo nyx run nginx:alpine
 
 # Detach immediately after start (fire-and-forget)
@@ -23,11 +23,20 @@ sudo nyx run --name web nginx:alpine
 # Docker-style flags: publish, env, hostname, restart
 sudo nyx run -p 8080:80 -e MYVAR=1 --hostname web --restart no nginx:alpine
 
+# Logs (optional follow; tail count)
+sudo nyx logs web
+sudo nyx logs -f --tail 100 web
+sudo nyx container logs web -f
+
 # List / remove (docker-like)
 sudo nyx ps
 sudo nyx ps -q
 sudo nyx stop web other-id
 sudo nyx rm web
+
+# Images (local refs pulled into the store)
+sudo nyx image ls
+sudo nyx image rm nginx:alpine
 
 # Stop from another shell
 sudo nyx stop web
@@ -58,6 +67,18 @@ curl -sS --unix-socket "$SOCK" -H 'Content-Type: application/json' \
   http://localhost/v1/containers/run
 
 curl -sS --unix-socket "$SOCK" -X POST http://localhost/v1/containers/<id>/stop
+
+curl -sS --unix-socket "$SOCK" -H 'Content-Type: application/json' \
+  -d '{"signal":"KILL"}' \
+  http://localhost/v1/containers/<id>/kill
+
+curl -sS --unix-socket "$SOCK" 'http://localhost/v1/containers/<id>/logs?tail=200&plain=1'
+
+curl -sS --unix-socket "$SOCK" http://localhost/v1/images
+
+curl -sS --unix-socket "$SOCK" -H 'Content-Type: application/json' \
+  -d '{"ref":"nginx:alpine"}' \
+  http://localhost/v1/images/remove
 
 curl -sS --unix-socket "$SOCK" -X POST http://localhost/v1/containers/<id>/remove
 

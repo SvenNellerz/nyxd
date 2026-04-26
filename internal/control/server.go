@@ -34,6 +34,7 @@ type Server struct {
 	store     *image.Store
 	lister    Lister
 	sup       *supervisor.Supervisor
+	dataDir   string // e.g. /var/lib/nyxd (for container log files)
 	baseCtx   context.Context
 	version   string
 	gitCommit string
@@ -48,13 +49,14 @@ type Server struct {
 // New constructs a control server. sup may be nil (run returns 503). store may be nil (pull 503).
 // baseCtx should be the daemon lifetime context (e.g. signal-notify ctx) for supervisor.Start.
 // lister is used for GET /v1/containers; if nil but sup non-nil, sup is used as Lister.
-func New(log *slog.Logger, rt *runtime.Runtime, store *image.Store, sup *supervisor.Supervisor, baseCtx context.Context, lister Lister, version, commit, date, socket string) *Server {
+// dataDir is the daemon base directory (logs live under dataDir/logs).
+func New(log *slog.Logger, rt *runtime.Runtime, store *image.Store, sup *supervisor.Supervisor, baseCtx context.Context, lister Lister, version, commit, date, dataDir, socket string) *Server {
 	l := lister
 	if l == nil && sup != nil {
 		l = sup
 	}
 	return &Server{
-		log: log, rt: rt, store: store, lister: l, sup: sup, baseCtx: baseCtx,
+		log: log, rt: rt, store: store, lister: l, sup: sup, dataDir: dataDir, baseCtx: baseCtx,
 		version: version, gitCommit: commit, buildDate: date,
 		socket: socket,
 	}
@@ -88,8 +90,12 @@ func (s *Server) Start() error {
 	mux.HandleFunc("POST /v1/containers/{id}/exec", s.handleExec)
 	mux.HandleFunc("POST /v1/containers/{id}/stop", s.handleContainerStop)
 	mux.HandleFunc("POST /v1/containers/{id}/remove", s.handleContainerRemove)
+	mux.HandleFunc("POST /v1/containers/{id}/kill", s.handleContainerKill)
+	mux.HandleFunc("GET /v1/containers/{id}/logs", s.handleContainerLogs)
 	mux.HandleFunc("POST /v1/containers/run", s.handleContainerRun)
 	mux.HandleFunc("POST /v1/images/pull", s.handleImagePull)
+	mux.HandleFunc("GET /v1/images", s.handleImagesList)
+	mux.HandleFunc("POST /v1/images/remove", s.handleImagesRemove)
 
 	s.srv = &http.Server{
 		Handler:      mux,

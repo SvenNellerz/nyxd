@@ -2,11 +2,14 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
+	"os"
+	"strconv"
 	"strings"
 )
 
@@ -275,14 +278,185 @@ func doStopMany(socket string, ids []string) error {
 
 func doContainer(socket string, args []string) error {
 	if len(args) < 1 {
-		return fmt.Errorf("usage: nyx container <ls|list|rm> ...")
+		return fmt.Errorf("usage: nyx container <ls|list|rm|logs> ...")
 	}
 	switch args[0] {
 	case "ls", "list":
 		return doPS(socket, args[1:])
 	case "rm":
 		return doRM(socket, args[1:])
+	case "logs":
+		if len(args) < 2 {
+			return fmt.Errorf("usage: nyx container logs <id> [flags...]")
+		}
+		return doLogs(socket, args[1:])
 	default:
-		return fmt.Errorf("unknown container subcommand %q (try ls, list, rm)", args[0])
+		return fmt.Errorf("unknown container subcommand %q (try ls, list, rm, logs)", args[0])
 	}
+}
+
+func streamContainerLogs(ctx context.Context, socket, id string, dest io.Writer) error {
+	q := url.Values{}
+	q.Set("follow", "1")
+	q.Set("plain", "1")
+	q.Set("tail", "99999")
+	u := fmt.Sprintf("http://unix/v1/containers/%s/logs?%s", url.PathEscape(id), q.Encode())
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return err
+	}
+	resp, err := httpClient(socket).Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return fmt.Errorf("%s: %s", resp.Status, bytes.TrimSpace(b))
+	}
+	_, err = io.Copy(dest, resp.Body)
+	if err != nil && ctx.Err() != nil {
+		return ctx.Err()
+	}
+	return err
+}
+
+func parseLogsArgs(args []string) (id string, follow bool, tail int, err error) {
+	tail = 200
+	var ids []string
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case a == "-f" || a == "--follow":
+			follow = true
+		case (a == "--tail" || a == "-n") && i+1 < len(args):
+			tail, err = strconv.Atoi(args[i+1])
+			if err != nil {
+				return "", false, 0, fmt.Errorf("invalid tail: %w", err)
+			}
+			i++
+		case strings.HasPrefix(a, "--tail="):
+			tail, err = strconv.Atoi(strings.TrimPrefix(a, "--tail="))
+			if err != nil {
+				return "", false, 0, fmt.Errorf("invalid --tail=: %w", err)
+			}
+		default:
+			if strings.HasPrefix(a, "-") {
+				return "", false, 0, fmt.Errorf("unknown flag %q", a)
+			}
+			ids = append(ids, a)
+		}
+	}
+	if len(ids) != 1 {
+		return "", false, 0, fmt.Errorf("usage: nyx logs [-f] [--tail N|-n N] <id>")
+	}
+	return ids[0], follow, tail, nil
+}
+
+func doLogs(socket string, args []string) error {
+	id, follow, tail, err := parseLogsArgs(args)
+	if err != nil {
+		return err
+	}
+	q := url.Values{}
+	if follow {
+		q.Set("follow", "1")
+	}
+	q.Set("plain", "1")
+	if tail > 0 {
+		q.Set("tail", strconv.Itoa(tail))
+	}
+	u := fmt.Sprintf("http://unix/v1/containers/%s/logs?%s", url.PathEscape(id), q.Encode())
+
+	ctx := context.Background()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return err
+	}
+	resp, err := httpClient(socket).Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("logs: %s: %s", resp.Status, bytes.TrimSpace(b))
+	}
+	_, err = io.Copy(os.Stdout, resp.Body)
+	return err
+}
+
+func doImage(socket string, args []string) error {
+	if len(args) < 1 {
+		return fmt.Errorf("usage: nyx image <ls|list|rm <ref>...>")
+	}
+	switch args[0] {
+	case "ls", "list":
+		if len(args) != 1 {
+			return fmt.Errorf("usage: nyx image ls")
+		}
+		return doImageList(socket)
+	case "rm":
+		if len(args) < 2 {
+			return fmt.Errorf("usage: nyx image rm <ref> [<ref>...]")
+		}
+		for _, ref := range args[1:] {
+			if strings.HasPrefix(ref, "-") {
+				return fmt.Errorf("unknown flag %q", ref)
+			}
+			if err := doImageRmOne(socket, ref); err != nil {
+				return fmt.Errorf("%s: %w", ref, err)
+			}
+		}
+		return nil
+	default:
+		return fmt.Errorf("unknown image subcommand %q (try ls, rm)", args[0])
+	}
+}
+
+func doImageList(socket string) error {
+	resp, err := httpClient(socket).Get("http://unix/v1/images")
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("image ls: %s: %s", resp.Status, bytes.TrimSpace(body))
+	}
+	var out struct {
+		Images []string `json:"images"`
+	}
+	if err := json.Unmarshal(body, &out); err != nil {
+		return err
+	}
+	for _, ref := range out.Images {
+		fmt.Println(ref)
+	}
+	return nil
+}
+
+func doImageRmOne(socket, ref string) error {
+	raw, _ := json.Marshal(map[string]string{"ref": ref})
+	req, err := http.NewRequest(http.MethodPost, "http://unix/v1/images/remove", bytes.NewReader(raw))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := httpClient(socket).Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("%s: %s", resp.Status, bytes.TrimSpace(b))
+	}
+	return nil
 }
