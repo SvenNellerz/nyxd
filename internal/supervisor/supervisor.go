@@ -8,13 +8,17 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"math/rand/v2"
+	"os"
+	"sort"
 	"sync"
 	"time"
 
 	"github.com/zrougamed/nyxd/internal/bundle"
 	"github.com/zrougamed/nyxd/internal/health"
+	"github.com/zrougamed/nyxd/internal/logs"
 	"github.com/zrougamed/nyxd/internal/network"
 	"github.com/zrougamed/nyxd/internal/overlay"
 	"github.com/zrougamed/nyxd/internal/runtime"
@@ -64,16 +68,18 @@ type containerEntry struct {
 	rootFS    string
 	restarts  int
 	stopped   bool // intentionally stopped - don't restart
+	logCancel context.CancelFunc
 	mu        sync.Mutex
 }
 
 // Supervisor manages the full lifecycle of containers.
 type Supervisor struct {
-	rt      *runtime.Runtime
-	ovl     *overlay.Manager
-	net     network.Backend
-	log     *slog.Logger
-	baseDir string // /var/lib/nyxd
+	rt       *runtime.Runtime
+	ovl      *overlay.Manager
+	net      network.Backend
+	logColl  *logs.Collector
+	log      *slog.Logger
+	baseDir  string // /var/lib/nyxd
 
 	mu         sync.RWMutex
 	containers map[string]*containerEntry
@@ -82,11 +88,13 @@ type Supervisor struct {
 
 // New constructs a Supervisor. net must implement [network.Backend]
 // (typically native in-process networking or the CNI exec [network.Manager]).
-func New(rt *runtime.Runtime, ovl *overlay.Manager, net network.Backend, baseDir string, log *slog.Logger) *Supervisor {
+// logColl may be nil (stdio is discarded and no log files are written).
+func New(rt *runtime.Runtime, ovl *overlay.Manager, net network.Backend, baseDir string, log *slog.Logger, logColl *logs.Collector) *Supervisor {
 	return &Supervisor{
 		rt:         rt,
 		ovl:        ovl,
 		net:        net,
+		logColl:    logColl,
 		log:        log,
 		baseDir:    baseDir,
 		containers: make(map[string]*containerEntry),
@@ -162,8 +170,52 @@ func (s *Supervisor) Stop(ctx context.Context, id string) error {
 	return nil
 }
 
+// Kill sends a signal (default KILL) and waits for crun to report stopped.
+// Sets stopped=true so restart policies do not respawn the container.
+func (s *Supervisor) Kill(ctx context.Context, id string, signal string) error {
+	if signal == "" {
+		signal = "KILL"
+	}
+	s.mu.RLock()
+	_, ok := s.containers[id]
+	s.mu.RUnlock()
+	if !ok {
+		return fmt.Errorf("container %s not found", id)
+	}
+
+	s.mu.RLock()
+	entry := s.containers[id]
+	s.mu.RUnlock()
+
+	entry.mu.Lock()
+	entry.stopped = true
+	entry.mu.Unlock()
+
+	stopCtx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+
+	if err := s.rt.Kill(stopCtx, id, signal); err != nil {
+		entry.mu.Lock()
+		entry.stopped = false
+		entry.mu.Unlock()
+		return fmt.Errorf("kill container: %w", err)
+	}
+
+	if err := s.rt.WaitStopped(stopCtx, id); err != nil {
+		return fmt.Errorf("wait container stopped: %w", err)
+	}
+	return nil
+}
+
 // Remove stops and removes a container and all its resources.
 func (s *Supervisor) Remove(ctx context.Context, id string) error {
+	s.mu.RLock()
+	_, exists := s.containers[id]
+	s.mu.RUnlock()
+	if !exists {
+		return fmt.Errorf("container %s not found", id)
+	}
+
 	if err := s.Stop(ctx, id); err != nil && !errors.Is(err, context.DeadlineExceeded) {
 		s.log.Warn("stop before remove", "id", id, "err", err)
 	}
@@ -190,6 +242,41 @@ func (s *Supervisor) List() []string {
 		ids = append(ids, id)
 	}
 	return ids
+}
+
+// ContainerInfo is a stable JSON shape for list/ps APIs.
+type ContainerInfo struct {
+	ID     string `json:"id"`
+	Image  string `json:"image"`
+	IP     string `json:"ip,omitempty"`
+	Status string `json:"status"`
+}
+
+// ListInfo returns supervised containers with runtime status and network IP.
+func (s *Supervisor) ListInfo(ctx context.Context) []ContainerInfo {
+	s.mu.RLock()
+	type snap struct {
+		id, img, ip string
+	}
+	var snaps []snap
+	for id, e := range s.containers {
+		e.mu.Lock()
+		snaps = append(snaps, snap{id: id, img: e.spec.Image, ip: e.ip})
+		e.mu.Unlock()
+	}
+	s.mu.RUnlock()
+
+	sort.Slice(snaps, func(i, j int) bool { return snaps[i].id < snaps[j].id })
+
+	out := make([]ContainerInfo, 0, len(snaps))
+	for _, sn := range snaps {
+		info := ContainerInfo{ID: sn.id, Image: sn.img, IP: sn.ip, Status: "unknown"}
+		if st, err := s.rt.State(ctx, sn.id); err == nil && st != nil {
+			info.Status = st.Status
+		}
+		out = append(out, info)
+	}
+	return out
 }
 
 // Shutdown stops all containers gracefully.

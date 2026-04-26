@@ -66,11 +66,17 @@ func run(args []string) error {
 		return doPull(socket, ref, jsonOut)
 	case "run":
 		return doRun(socket, args[1:])
+	case "ps":
+		return doPS(socket, args[1:])
+	case "rm":
+		return doRM(socket, args[1:])
+	case "container":
+		return doContainer(socket, args[1:])
 	case "stop":
 		if len(args) < 2 {
-			return fmt.Errorf("usage: nyx stop <id>")
+			return fmt.Errorf("usage: nyx stop <id> [<id>...]")
 		}
-		return doStop(socket, args[1])
+		return doStopMany(socket, args[1:])
 	case "exec":
 		return doExec(socket, args[1:])
 	default:
@@ -85,9 +91,17 @@ Commands:
   ping              GET /v1/ping
   version           GET /v1/version
   pull [--json] <ref>   streamed progress + summary (use --json for raw JSON)
-  run [-d|--detach] [--name ID] <image> [-- <argv...>]   POST /v1/containers/run (foreground: Ctrl+C stops)
-  stop <id>         POST /v1/containers/{id}/stop
-  exec <id> [--] <argv...>   POST /v1/containers/{id}/exec
+  run [docker flags] <image> [-- <argv...>]   start container (foreground: Ctrl+C stops)
+      Docker-style flags:
+        -p, --publish HOST:CONTAINER[/tcp|/udp]   (repeatable; e.g. -p 8080:80)
+        -e, --env KEY=VAL                       (repeatable)
+        --name <id>   -d, --detach   --hostname <h>   --restart <policy>
+        -h <hostname>   (same as docker run -h; use "nyx --help" for nyx help)
+  ps [-q] [--no-trunc]     list containers (docker-style table)
+  stop <id> [<id>...]      stop one or more containers
+  rm <id> [<id>...]        remove container(s) (POST /v1/containers/{id}/remove)
+  container <ls|list|rm>   aliases for ps / rm
+  exec [-i] [-t] <id> [--] <argv...>   exec in container (-i/-t accepted; no TTY attach)
 
 Environment:
   NYXD_SOCKET   default control socket (default %s)
@@ -140,65 +154,29 @@ func doVersion(socket string) error {
 	return err
 }
 
-func parseRunArgs(args []string) (name, image string, cmdArgs []string, detach bool, err error) {
-	i := 0
-flags:
-	for i < len(args) {
-		a := args[i]
-		switch {
-		case a == "-d" || a == "--detach":
-			detach = true
-			i++
-		case a == "--name" && i+1 < len(args):
-			name = args[i+1]
-			i += 2
-		case strings.HasPrefix(a, "--name="):
-			name = strings.TrimPrefix(a, "--name=")
-			i++
-		default:
-			if strings.HasPrefix(a, "-") {
-				return "", "", nil, false, fmt.Errorf("unknown flag %q", a)
-			}
-			break flags
-		}
-	}
-	rest := args[i:]
-	if len(rest) < 1 {
-		return "", "", nil, false, fmt.Errorf("usage: nyx run [-d|--detach] [--name ID] <image> [-- <argv...>]")
-	}
-	dash := -1
-	for j, a := range rest {
-		if a == "--" {
-			dash = j
-			break
-		}
-	}
-	switch {
-	case dash == 0:
-		return "", "", nil, false, fmt.Errorf("missing image before --")
-	case dash > 0:
-		if dash != 1 {
-			return "", "", nil, false, fmt.Errorf("expected a single image ref before --")
-		}
-		image = rest[0]
-		cmdArgs = rest[dash+1:]
-	default:
-		image = rest[0]
-	}
-	return name, image, cmdArgs, detach, nil
-}
-
 func doRun(socket string, args []string) error {
-	name, image, cmdArgs, detach, err := parseRunArgs(args)
+	o, err := parseDockerRunArgs(args)
 	if err != nil {
 		return err
 	}
-	body := map[string]any{"image": image}
-	if name != "" {
-		body["id"] = name
+	body := map[string]any{"image": o.image}
+	if o.name != "" {
+		body["id"] = o.name
 	}
-	if len(cmdArgs) > 0 {
-		body["args"] = cmdArgs
+	if len(o.cmdArgs) > 0 {
+		body["args"] = o.cmdArgs
+	}
+	if len(o.env) > 0 {
+		body["env"] = o.env
+	}
+	if o.hostname != "" {
+		body["hostname"] = o.hostname
+	}
+	if o.restart != "" {
+		body["restart"] = o.restart
+	}
+	if len(o.publish) > 0 {
+		body["publish"] = o.publish
 	}
 	raw, _ := json.Marshal(body)
 
@@ -229,7 +207,7 @@ func doRun(socket string, args []string) error {
 	if err := json.Unmarshal(b, &out); err != nil || !out.OK || out.ID == "" {
 		return nil
 	}
-	if detach {
+	if o.detach {
 		return nil
 	}
 
@@ -274,20 +252,9 @@ func doStopWithContext(ctx context.Context, socket, id string) error {
 }
 
 func doExec(socket string, args []string) error {
-	if len(args) < 1 {
-		return fmt.Errorf("usage: nyx exec <id> [--] <argv...>")
-	}
-	id := args[0]
-	rest := args[1:]
-	argv := rest
-	for i, a := range rest {
-		if a == "--" {
-			argv = rest[i+1:]
-			break
-		}
-	}
-	if len(argv) == 0 {
-		return fmt.Errorf("missing command after container id")
+	id, argv, err := parseExecArgs(args)
+	if err != nil {
+		return err
 	}
 
 	c := httpClient(socket)

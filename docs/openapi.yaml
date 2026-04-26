@@ -64,15 +64,30 @@ paths:
   /v1/containers:
     get:
       tags: [containers]
-      summary: List supervised container IDs
+      summary: List supervised containers
+      description: |
+        Without `detail`, returns `{"containers":["id",...]}` (IDs only).
+
+        With `?detail=1` or `?detail=true`, also returns `items`: an array of
+        `{id, image, ip, status}` suitable for `nyx ps`.
       operationId: listContainers
+      parameters:
+        - name: detail
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: ["1", "true", ""]
+          description: When `1` or `true`, include per-container metadata in `items`.
       responses:
         "200":
-          description: Container id list
+          description: Container list (with or without detail)
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/ContainersResponse"
+                oneOf:
+                  - $ref: "#/components/schemas/ContainersResponse"
+                  - $ref: "#/components/schemas/ContainersDetailResponse"
 
   /v1/images/pull:
     post:
@@ -162,6 +177,34 @@ paths:
         "503":
           description: Supervisor unavailable
 
+  /v1/containers/{id}/remove:
+    post:
+      tags: [containers]
+      summary: Remove a container
+      description: |
+        Stops the container if needed, deletes crun state, and tears down
+        network and overlay resources.
+      operationId: removeContainer
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Removed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RemoveResponse"
+        "400":
+          description: Bad request
+        "404":
+          description: Container not found
+        "503":
+          description: Supervisor unavailable
+
   /v1/containers/{id}/exec:
     post:
       tags: [containers]
@@ -227,6 +270,42 @@ components:
           type: array
           items:
             type: string
+
+    ContainersDetailResponse:
+      type: object
+      required: [containers, items]
+      properties:
+        containers:
+          type: array
+          items:
+            type: string
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/ContainerItem"
+
+    ContainerItem:
+      type: object
+      required: [id, image, status]
+      properties:
+        id:
+          type: string
+        image:
+          type: string
+        ip:
+          type: string
+        status:
+          type: string
+          description: crun state status (e.g. running, stopped)
+
+    RemoveResponse:
+      type: object
+      required: [ok, id]
+      properties:
+        ok:
+          type: boolean
+        id:
+          type: string
 
     PullRequest:
       type: object
@@ -363,6 +442,25 @@ components:
         restart:
           type: string
           description: Restart policy (`always`, `on-failure`, `unless-stopped`, `never`, …)
+        publish:
+          type: array
+          description: Docker-style port specs (e.g. `8080:80`, `127.0.0.1:9000:443/udp`)
+          items:
+            type: string
+        ports:
+          type: array
+          description: Structured port maps (alternative to `publish`)
+          items:
+            type: object
+            required: [hostPort, containerPort]
+            properties:
+              hostPort:
+                type: integer
+              containerPort:
+                type: integer
+              protocol:
+                type: string
+                enum: [tcp, udp]
 
     RunResponse:
       type: object

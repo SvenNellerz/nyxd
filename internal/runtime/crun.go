@@ -85,6 +85,37 @@ func (r *Runtime) Run(ctx context.Context, containerID, bundleDir string) error 
 	return r.run(ctx, args, nil)
 }
 
+// RunForeground runs the container in the foreground: crun blocks until the init
+// process exits. Container stdout/stderr are wired to the given writers (typically
+// pipes feeding a log collector). No --detach flag.
+func (r *Runtime) RunForeground(ctx context.Context, containerID, bundleDir string, stdout, stderr io.Writer) error {
+	if stdout == nil {
+		stdout = io.Discard
+	}
+	if stderr == nil {
+		stderr = io.Discard
+	}
+	cmd := exec.CommandContext(ctx, r.binary,
+		"--root", r.rootDir,
+		"run",
+		"--bundle", bundleDir,
+		containerID,
+	)
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
+	cmd.Stdin = nil
+	var errBuf bytes.Buffer
+	cmd.Stderr = io.MultiWriter(stderr, &errBuf)
+	if err := cmd.Run(); err != nil {
+		msg := strings.TrimSpace(errBuf.String())
+		if msg != "" {
+			return fmt.Errorf("crun run: %w: %s", err, msg)
+		}
+		return fmt.Errorf("crun run: %w", err)
+	}
+	return nil
+}
+
 // Kill sends a signal to a container's init process.
 func (r *Runtime) Kill(ctx context.Context, containerID, signal string) error {
 	if signal == "" {

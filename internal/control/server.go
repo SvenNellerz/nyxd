@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/zrougamed/nyxd/internal/image"
+	"github.com/zrougamed/nyxd/internal/network"
 	"github.com/zrougamed/nyxd/internal/runtime"
 	"github.com/zrougamed/nyxd/internal/supervisor"
 )
@@ -86,6 +87,7 @@ func (s *Server) Start() error {
 	mux.HandleFunc("GET /v1/containers", s.handleContainers)
 	mux.HandleFunc("POST /v1/containers/{id}/exec", s.handleExec)
 	mux.HandleFunc("POST /v1/containers/{id}/stop", s.handleContainerStop)
+	mux.HandleFunc("POST /v1/containers/{id}/remove", s.handleContainerRemove)
 	mux.HandleFunc("POST /v1/containers/run", s.handleContainerRun)
 	mux.HandleFunc("POST /v1/images/pull", s.handleImagePull)
 
@@ -135,10 +137,22 @@ func (s *Server) handleVersion(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleContainers(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
+	detail := r.URL.Query().Get("detail") == "1" || r.URL.Query().Get("detail") == "true"
+
 	var ids []string
 	if s.lister != nil {
 		ids = s.lister.List()
 	}
+
+	if detail && s.sup != nil {
+		items := s.sup.ListInfo(r.Context())
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"containers": ids,
+			"items":      items,
+		})
+		return
+	}
+
 	_ = json.NewEncoder(w).Encode(map[string]any{"containers": ids})
 }
 
@@ -187,6 +201,33 @@ func (s *Server) handleContainerStop(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.sup.Stop(r.Context(), id); err != nil {
+		msg := err.Error()
+		if strings.Contains(msg, "not found") {
+			http.Error(w, msg, http.StatusNotFound)
+			return
+		}
+		http.Error(w, msg, http.StatusBadRequest)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "id": id})
+}
+
+func (s *Server) handleContainerRemove(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.sup == nil {
+		http.Error(w, "supervisor not available", http.StatusServiceUnavailable)
+		return
+	}
+	id := strings.TrimSpace(r.PathValue("id"))
+	if id == "" {
+		http.Error(w, "missing container id", http.StatusBadRequest)
+		return
+	}
+	if err := s.sup.Remove(r.Context(), id); err != nil {
 		msg := err.Error()
 		if strings.Contains(msg, "not found") {
 			http.Error(w, msg, http.StatusNotFound)
@@ -282,6 +323,12 @@ type runRequest struct {
 	Env      []string `json:"env,omitempty"`
 	Hostname string   `json:"hostname,omitempty"`
 	Restart  string   `json:"restart,omitempty"`
+	Publish  []string `json:"publish,omitempty"`
+	Ports    []struct {
+		HostPort        int    `json:"hostPort"`
+		ContainerPort   int    `json:"containerPort"`
+		Protocol        string `json:"protocol,omitempty"`
+	} `json:"ports,omitempty"`
 }
 
 func (s *Server) handleContainerRun(w http.ResponseWriter, r *http.Request) {
@@ -319,6 +366,35 @@ func (s *Server) handleContainerRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	var portMaps []network.PortMapping
+	for _, pub := range body.Publish {
+		p, err := network.ParseDockerPublish(pub)
+		if err != nil {
+			http.Error(w, "publish: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		portMaps = append(portMaps, p)
+	}
+	for _, p := range body.Ports {
+		proto := strings.ToLower(strings.TrimSpace(p.Protocol))
+		if proto == "" {
+			proto = "tcp"
+		}
+		if proto != "tcp" && proto != "udp" {
+			http.Error(w, "ports: invalid protocol "+proto, http.StatusBadRequest)
+			return
+		}
+		if p.HostPort < 1 || p.HostPort > 65535 || p.ContainerPort < 1 || p.ContainerPort > 65535 {
+			http.Error(w, "ports: invalid port range", http.StatusBadRequest)
+			return
+		}
+		portMaps = append(portMaps, network.PortMapping{
+			HostPort:        p.HostPort,
+			ContainerPort:   p.ContainerPort,
+			Protocol:        proto,
+		})
+	}
+
 	spec := supervisor.ContainerSpec{
 		ID:             id,
 		Image:          image,
@@ -330,6 +406,7 @@ func (s *Server) handleContainerRun(w http.ResponseWriter, r *http.Request) {
 		Hostname:       body.Hostname,
 		RestartPolicy:  parseRestartPolicy(body.Restart),
 		ReadOnly:       false,
+		PortMappings:   portMaps,
 	}
 	if err := s.sup.Start(baseCtx, spec); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)

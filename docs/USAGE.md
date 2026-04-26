@@ -20,10 +20,20 @@ sudo nyx run -d nginx:alpine
 # Named container
 sudo nyx run --name web nginx:alpine
 
+# Docker-style flags: publish, env, hostname, restart
+sudo nyx run -p 8080:80 -e MYVAR=1 --hostname web --restart no nginx:alpine
+
+# List / remove (docker-like)
+sudo nyx ps
+sudo nyx ps -q
+sudo nyx stop web other-id
+sudo nyx rm web
+
 # Stop from another shell
 sudo nyx stop web
 
-# Exec
+# Exec (flags before id like docker; `--` optional)
+sudo nyx exec <id> sh -c 'hostname'
 sudo nyx exec <id> -- sh -c 'hostname'
 ```
 
@@ -37,16 +47,19 @@ SOCK=/run/nyxd/nyxd.sock
 curl -sS --unix-socket "$SOCK" http://localhost/v1/ping
 curl -sS --unix-socket "$SOCK" http://localhost/v1/version
 curl -sS --unix-socket "$SOCK" http://localhost/v1/containers
+curl -sS --unix-socket "$SOCK" 'http://localhost/v1/containers?detail=1'
 
 curl -sS --unix-socket "$SOCK" -H 'Content-Type: application/json' \
   -d '{"ref":"nginx:alpine","stream":false}' \
   http://localhost/v1/images/pull
 
 curl -sS --unix-socket "$SOCK" -H 'Content-Type: application/json' \
-  -d '{"image":"nginx:alpine"}' \
+  -d '{"image":"nginx:alpine","publish":["8080:80"]}' \
   http://localhost/v1/containers/run
 
 curl -sS --unix-socket "$SOCK" -X POST http://localhost/v1/containers/<id>/stop
+
+curl -sS --unix-socket "$SOCK" -X POST http://localhost/v1/containers/<id>/remove
 
 curl -sS --unix-socket "$SOCK" -H 'Content-Type: application/json' \
   -d '{"argv":["sh","-c","uname -a"]}' \
