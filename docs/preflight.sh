@@ -86,12 +86,20 @@ done
 
 # Seccomp is a built-in kernel facility (CONFIG_SECCOMP_FILTER), not a loadable module
 # named "seccomp" — modprobe seccomp fails on typical distros even when crun works fine.
+# Many /proc/sys files report st_size 0; never use test -s — read content instead.
 echo ""
 echo "[ Seccomp ]"
-if [ -r /proc/sys/kernel/seccomp/actions_avail ] && [ -s /proc/sys/kernel/seccomp/actions_avail ]; then
-  pass "seccomp BPF available (kernel built-in; not a .ko module)"
+_sa=""
+if [ -r /proc/sys/kernel/seccomp/actions_avail ]; then
+  _sa=$(cat /proc/sys/kernel/seccomp/actions_avail 2>/dev/null | tr -d '\r\n')
+fi
+if [ -z "${_sa// /}" ]; then
+  _sa=$(sysctl -n kernel.seccomp.actions_avail 2>/dev/null | tr -d '\r\n' || true)
+fi
+if [ -n "${_sa// /}" ]; then
+  pass "seccomp syscall filtering available (built-in; not the same as tracing/XDP eBPF)"
 else
-  fail "seccomp BPF unavailable — need CONFIG_SECCOMP_FILTER (expected on 5.11+)"
+  fail "seccomp syscall filtering unavailable — need CONFIG_SECCOMP_FILTER for typical crun defaults (tracing/eBPF alone is not a substitute)"
 fi
 
 # nft modules (warn not fail — kernel may have them built-in)

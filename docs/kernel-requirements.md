@@ -41,7 +41,7 @@ nft_chain_nat
 
 Seccomp / Seccomp BPF are **built into the kernel** (`CONFIG_SECCOMP`, `CONFIG_SECCOMP_FILTER`). There is **no** loadable module named `seccomp`; `modprobe seccomp` is wrong on typical kernels. crun still applies seccomp profiles via the prctl/seccomp syscalls when those options are enabled.
 
-Verify after boot:
+Verify after boot (note: the file often reports **size 0** to `stat`; use `cat`, not `test -s`):
 
 ```bash
 test -r /proc/sys/kernel/seccomp/actions_avail && cat /proc/sys/kernel/seccomp/actions_avail
@@ -228,7 +228,7 @@ done
 
 echo ""
 echo "[ Seccomp ]"
-check "seccomp BPF (actions_avail)" test -r /proc/sys/kernel/seccomp/actions_avail
+check "seccomp (actions_avail has content)" bash -c 'a=$(cat /proc/sys/kernel/seccomp/actions_avail 2>/dev/null); test -n "${a//[[:space:]]/}"'
 
 echo ""
 echo "[ sysctls ]"
