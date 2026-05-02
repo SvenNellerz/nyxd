@@ -37,6 +37,7 @@ func (s *Server) handleContainerKill(w http.ResponseWriter, r *http.Request) {
 	if sig := strings.TrimSpace(body.Signal); sig != "" {
 		signal = strings.TrimPrefix(strings.TrimSpace(sig), "SIG")
 	}
+	s.log.Info("control API kill", "id", id, "signal", signal)
 	if err := s.sup.Kill(r.Context(), id, signal); err != nil {
 		msg := err.Error()
 		if strings.Contains(msg, "not found") {
@@ -212,4 +213,39 @@ func (s *Server) handleImagesRemove(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "ref": ref})
+}
+
+type imagePruneRequest struct {
+	DryRun bool `json:"dry_run"`
+}
+
+func (s *Server) handleImagesPrune(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.store == nil {
+		http.Error(w, "image store not available", http.StatusServiceUnavailable)
+		return
+	}
+	if s.sup == nil {
+		http.Error(w, "supervisor not available", http.StatusServiceUnavailable)
+		return
+	}
+	var body imagePruneRequest
+	_ = json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&body)
+
+	keep := s.sup.ImageRefsInUse()
+	removed, err := s.store.PruneImagesNotIn(keep, body.DryRun)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"ok":      true,
+		"dry_run": body.DryRun,
+		"removed": removed,
+		"in_use":  len(keep),
+	})
 }

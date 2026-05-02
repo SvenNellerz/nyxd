@@ -13,7 +13,7 @@ import (
 	"strings"
 )
 
-// runOpts collects docker-style `nyx run` flags and the image / command tail.
+// runOpts collects `nyx run` flags and the image / command tail.
 type runOpts struct {
 	name     string
 	image    string
@@ -25,7 +25,7 @@ type runOpts struct {
 	publish  []string
 }
 
-func parseDockerRunArgs(args []string) (runOpts, error) {
+func parseRunArgs(args []string) (runOpts, error) {
 	var o runOpts
 	i := 0
 	for i < len(args) {
@@ -78,7 +78,7 @@ func parseDockerRunArgs(args []string) (runOpts, error) {
 			i++
 		case a == "-h":
 			if i+1 >= len(args) {
-				return o, fmt.Errorf("-h requires a hostname value (docker-compatible); use --help before the command for nyx help")
+				return o, fmt.Errorf("-h requires a hostname value; use --help before the command for nyx client help")
 			}
 			o.hostname = args[i+1]
 			i += 2
@@ -391,7 +391,7 @@ func doLogs(socket string, args []string) error {
 
 func doImage(socket string, args []string) error {
 	if len(args) < 1 {
-		return fmt.Errorf("usage: nyx image <ls|list|rm <ref>...>")
+		return fmt.Errorf("usage: nyx image <ls|list|rm|prune> ...")
 	}
 	switch args[0] {
 	case "ls", "list":
@@ -412,8 +412,10 @@ func doImage(socket string, args []string) error {
 			}
 		}
 		return nil
+	case "prune":
+		return doImagePrune(socket, args[1:])
 	default:
-		return fmt.Errorf("unknown image subcommand %q (try ls, rm)", args[0])
+		return fmt.Errorf("unknown image subcommand %q (try ls, rm, prune)", args[0])
 	}
 }
 
@@ -457,6 +459,60 @@ func doImageRmOne(socket, ref string) error {
 	b, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("%s: %s", resp.Status, bytes.TrimSpace(b))
+	}
+	return nil
+}
+
+func doImagePrune(socket string, args []string) error {
+	dryRun := false
+	for _, a := range args {
+		switch a {
+		case "--dry-run", "-n":
+			dryRun = true
+		default:
+			if strings.HasPrefix(a, "-") {
+				return fmt.Errorf("unknown flag %q", a)
+			}
+			return fmt.Errorf("unexpected argument %q (only --dry-run / -n allowed)", a)
+		}
+	}
+	raw, _ := json.Marshal(map[string]bool{"dry_run": dryRun})
+	req, err := http.NewRequest(http.MethodPost, "http://unix/v1/images/prune", bytes.NewReader(raw))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := httpClient(socket).Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	b, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("image prune: %s: %s", resp.Status, bytes.TrimSpace(b))
+	}
+	var out struct {
+		OK      bool     `json:"ok"`
+		DryRun  bool     `json:"dry_run"`
+		Removed []string `json:"removed"`
+	}
+	if err := json.Unmarshal(b, &out); err != nil {
+		return err
+	}
+	if len(out.Removed) == 0 {
+		fmt.Println("nothing to prune")
+		return nil
+	}
+	action := "Removed"
+	if out.DryRun {
+		action = "Would remove"
+	}
+	fmt.Printf("%s %d image(s):\n", action, len(out.Removed))
+	for _, ref := range out.Removed {
+		fmt.Println(ref)
 	}
 	return nil
 }

@@ -96,6 +96,7 @@ func (s *Server) Start() error {
 	mux.HandleFunc("POST /v1/images/pull", s.handleImagePull)
 	mux.HandleFunc("GET /v1/images", s.handleImagesList)
 	mux.HandleFunc("POST /v1/images/remove", s.handleImagesRemove)
+	mux.HandleFunc("POST /v1/images/prune", s.handleImagesPrune)
 
 	s.srv = &http.Server{
 		Handler:      mux,

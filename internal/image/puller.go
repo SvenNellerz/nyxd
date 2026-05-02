@@ -261,6 +261,30 @@ func (s *Store) RemoveImage(ref string) error {
 	return nil
 }
 
+// PruneImagesNotIn removes local image metadata for refs not in keepRefs.
+// If dryRun is true, returns refs that would be removed without deleting.
+func (s *Store) PruneImagesNotIn(keepRefs map[string]struct{}, dryRun bool) ([]string, error) {
+	refs, err := s.ListImageRefs()
+	if err != nil {
+		return nil, err
+	}
+	var removed []string
+	for _, ref := range refs {
+		if _, keep := keepRefs[ref]; keep {
+			continue
+		}
+		if dryRun {
+			removed = append(removed, ref)
+			continue
+		}
+		if err := s.RemoveImage(ref); err != nil {
+			return removed, fmt.Errorf("prune %q: %w", ref, err)
+		}
+		removed = append(removed, ref)
+	}
+	return removed, nil
+}
+
 // pullLayers fetches all layers with bounded concurrency.
 func (s *Store) pullLayers(ctx context.Context, client *registryClient, layers []oci.Descriptor, emit func(PullEvent)) error {
 	type result struct{ err error }

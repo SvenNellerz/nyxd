@@ -68,7 +68,7 @@ func Setup(ctx context.Context, containerID, netNSPath string, ports []network.P
 	}
 
 	// 2. IPAM
-	ip, err := globalIPAM.allocate(containerID)
+	ip, err := getIPAM().allocate(containerID)
 	if err != nil {
 		return "", fmt.Errorf("ipam: %w", err)
 	}
@@ -81,19 +81,19 @@ func Setup(ctx context.Context, containerID, netNSPath string, ports []network.P
 	_ = deleteLink(hostVeth)
 	_ = deleteLink(peerVeth)
 	if err := createVethPair(hostVeth, peerVeth, log); err != nil {
-		globalIPAM.release(containerID) //nolint:errcheck
+		getIPAM().release(containerID) //nolint:errcheck
 		return "", fmt.Errorf("veth: %w", err)
 	}
 
 	if err := attachVethToBridge(hostVeth, BridgeName, log); err != nil {
 		deleteLink(hostVeth) //nolint:errcheck
-		globalIPAM.release(containerID)
+		getIPAM().release(containerID)
 		return "", fmt.Errorf("attach bridge: %w", err)
 	}
 
 	if err := moveVethToNetNS(peerVeth, netNSPath, ip, GatewayIP, log); err != nil {
 		deleteLink(hostVeth) //nolint:errcheck
-		globalIPAM.release(containerID)
+		getIPAM().release(containerID)
 		return "", fmt.Errorf("move veth: %w", err)
 	}
 
@@ -130,7 +130,7 @@ func Teardown(ctx context.Context, containerID string, log *slog.Logger) error {
 		errs = append(errs, fmt.Errorf("delete veth: %w", err))
 	}
 
-	if err := globalIPAM.release(containerID); err != nil {
+	if err := getIPAM().release(containerID); err != nil {
 		errs = append(errs, fmt.Errorf("ipam release: %w", err))
 	}
 
@@ -333,7 +333,36 @@ func setLoUp(netNSPath string) error {
 
 // ─── IPAM ─────────────────────────────────────────────────────────────────────
 
-var globalIPAM = newIPAM("/var/lib/nyxd/ipam", ContainerSubnet)
+var (
+	ipamOnce sync.Once
+	ipamInst *ipam
+)
+
+// getIPAM returns the process-wide file-backed IP allocator.
+// Default state dir is /var/lib/nyxd/ipam; override with NYXD_IPAM_DIR.
+// If the default is not writable (e.g. CI without root), falls back to $TMPDIR/nyxd-ipam.
+func getIPAM() *ipam {
+	ipamOnce.Do(func() {
+		dir := strings.TrimSpace(os.Getenv("NYXD_IPAM_DIR"))
+		if dir == "" {
+			def := "/var/lib/nyxd/ipam"
+			if err := os.MkdirAll(def, 0o700); err == nil {
+				dir = def
+			} else {
+				dir = filepath.Join(os.TempDir(), "nyxd-ipam")
+				if err := os.MkdirAll(dir, 0o700); err != nil {
+					panic("ipam dir: cannot create " + dir + ": " + err.Error())
+				}
+			}
+		} else {
+			if err := os.MkdirAll(dir, 0o700); err != nil {
+				panic("ipam dir: cannot create " + dir + ": " + err.Error())
+			}
+		}
+		ipamInst = newIPAM(dir, ContainerSubnet)
+	})
+	return ipamInst
+}
 
 // ipam is a simple file-backed IP allocator.
 // Uses one file per allocated IP: /ipamDir/<hex-ip> → containerID

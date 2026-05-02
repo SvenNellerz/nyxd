@@ -359,6 +359,32 @@ paths:
         "503":
           description: Image store not configured
 
+  /v1/images/prune:
+    post:
+      tags: [images]
+      summary: Remove local image metadata not referenced by any supervised container
+      description: |
+        Uses in-memory supervisor container specs (`ContainerSpec.Image` strings) as the keep set.
+        Does not delete content blobs under `blobs/sha256`.
+      operationId: pruneImages
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ImagePruneRequest"
+      responses:
+        "200":
+          description: Prune result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImagePruneResponse"
+        "400":
+          description: Bad request
+        "503":
+          description: Image store or supervisor not configured
+
 components:
   schemas:
     PingResponse:
@@ -464,6 +490,29 @@ components:
           type: boolean
         ref:
           type: string
+
+    ImagePruneRequest:
+      type: object
+      properties:
+        dry_run:
+          type: boolean
+          description: If true, only list refs that would be removed.
+
+    ImagePruneResponse:
+      type: object
+      required: [ok, dry_run, removed, in_use]
+      properties:
+        ok:
+          type: boolean
+        dry_run:
+          type: boolean
+        removed:
+          type: array
+          items:
+            type: string
+        in_use:
+          type: integer
+          description: Count of distinct image refs held by supervised containers.
 
     PullRequest:
       type: object

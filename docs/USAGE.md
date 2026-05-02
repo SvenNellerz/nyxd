@@ -37,6 +37,10 @@ sudo nyx rm web
 # Images (local refs pulled into the store)
 sudo nyx image ls
 sudo nyx image rm nginx:alpine
+sudo nyx image prune              # remove image metadata not referenced by any running container
+sudo nyx image prune --dry-run      # list what would be removed
+
+# Daemon restart: the supervisor does not persist container state; after an unclean stop you may need `nyx rm <id>` or manual crun cleanup. Image prune does not delete blob files (see roadmap).
 
 # Stop from another shell
 sudo nyx stop web
@@ -79,6 +83,14 @@ curl -sS --unix-socket "$SOCK" http://localhost/v1/images
 curl -sS --unix-socket "$SOCK" -H 'Content-Type: application/json' \
   -d '{"ref":"nginx:alpine"}' \
   http://localhost/v1/images/remove
+
+curl -sS --unix-socket "$SOCK" -H 'Content-Type: application/json' \
+  -d '{}' \
+  http://localhost/v1/images/prune
+
+curl -sS --unix-socket "$SOCK" -H 'Content-Type: application/json' \
+  -d '{"dry_run":true}' \
+  http://localhost/v1/images/prune
 
 curl -sS --unix-socket "$SOCK" -X POST http://localhost/v1/containers/<id>/remove
 

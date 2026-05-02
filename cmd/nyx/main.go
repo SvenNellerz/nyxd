@@ -95,19 +95,20 @@ Commands:
   ping              GET /v1/ping
   version           GET /v1/version
   pull [--json] <ref>   streamed progress + summary (use --json for raw JSON)
-  run [docker flags] <image> [-- <argv...>]   start container
+  run [flags] <image> [-- <argv...>]   start container
       Foreground (no -d): stream container logs; Ctrl+C sends SIGKILL.
-      Docker-style flags:
+      Flags:
         -p, --publish HOST:CONTAINER[/tcp|/udp]   (repeatable; e.g. -p 8080:80)
         -e, --env KEY=VAL                       (repeatable)
         --name <id>   -d, --detach   --hostname <h>   --restart <policy>
-        -h <hostname>   (same as docker run -h; use "nyx --help" for nyx help)
-  ps [-q] [--no-trunc]     list containers (docker-style table)
+        -h <hostname>   (use "nyx --help" before the command for client help)
+  ps [-q] [--no-trunc]     list containers
   logs [-f] [--tail N] [-n N] <id>   container logs (GET /v1/containers/{id}/logs)
   stop <id> [<id>...]      stop one or more containers
   rm <id> [<id>...]        remove container(s) (POST /v1/containers/{id}/remove)
   image ls                 list pulled image refs
   image rm <ref> [<ref>...]   remove image metadata (POST /v1/images/remove)
+  image prune [--dry-run|-n]   remove pulled images not used by any running container
   container <ls|list|rm|logs>   aliases for ps / rm / logs
   exec [-i] [-t] <id> [--] <argv...>   exec in container (-i/-t accepted; no TTY attach)
 
@@ -163,7 +164,7 @@ func doVersion(socket string) error {
 }
 
 func doRun(socket string, args []string) error {
-	o, err := parseDockerRunArgs(args)
+	o, err := parseRunArgs(args)
 	if err != nil {
 		return err
 	}
@@ -234,7 +235,8 @@ func doRun(socket string, args []string) error {
 	<-sigCh
 
 	logCancel()
-	killCtx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	// Server may wait up to ~90s for crun "stopped" then ~45s for force delete.
+	killCtx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
 	if err := doKillWithContext(killCtx, socket, out.ID); err != nil {
 		fmt.Fprintf(os.Stderr, "nyx: kill: %v\n", err)

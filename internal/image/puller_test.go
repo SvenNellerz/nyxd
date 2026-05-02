@@ -64,3 +64,25 @@ func TestParseRef(t *testing.T) {
 		})
 	}
 }
+
+func TestPruneImagesNotInEmptyStore(t *testing.T) {
+	d := t.TempDir()
+	s, err := image.NewStore(d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.PruneImagesNotIn(nil, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("want empty removed, got %v", got)
+	}
+	gotDry, err := s.PruneImagesNotIn(nil, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(gotDry) != 0 {
+		t.Fatalf("want empty dry run, got %v", gotDry)
+	}
+}

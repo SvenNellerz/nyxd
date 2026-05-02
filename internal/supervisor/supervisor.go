@@ -13,6 +13,7 @@ import (
 	"math/rand/v2"
 	"os"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -126,6 +127,22 @@ func (s *Supervisor) Start(ctx context.Context, spec ContainerSpec) error {
 	return nil
 }
 
+// waitStoppedOrForceDelete waits for crun to report stopped; if that times out or fails,
+// runs `crun delete --force` so a wedged foreground `crun run` cannot block shutdown forever.
+func (s *Supervisor) waitStoppedOrForceDelete(waitCtx context.Context, id, op string) error {
+	if err := s.rt.WaitStopped(waitCtx, id); err != nil {
+		s.log.Warn("wait for crun stopped failed or timed out", "id", id, "op", op, "err", err)
+		delCtx, delCancel := context.WithTimeout(context.Background(), 45*time.Second)
+		defer delCancel()
+		if err2 := s.rt.Delete(delCtx, id, true); err2 != nil {
+			return fmt.Errorf("wait container stopped: %w; force delete: %v", err, err2)
+		}
+		s.log.Info("crun delete --force after wait timeout", "id", id, "op", op)
+		return nil
+	}
+	return nil
+}
+
 // Stop gracefully stops a container.
 func (s *Supervisor) Stop(ctx context.Context, id string) error {
 	s.mu.RLock()
@@ -139,23 +156,30 @@ func (s *Supervisor) Stop(ctx context.Context, id string) error {
 	entry.stopped = true
 	entry.mu.Unlock()
 
-	timeout := entry.spec.StopTimeout
-	if timeout == 0 {
-		timeout = 30 * time.Second
+	waitBudget := entry.spec.StopTimeout
+	if waitBudget == 0 {
+		waitBudget = 90 * time.Second
 	}
-	// Do not tie kill+wait to the HTTP request context: the client may cancel
-	// as soon as the response is written, which would abort crun before teardown.
-	stopCtx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
+	if waitBudget < 45*time.Second {
+		waitBudget = 45 * time.Second
+	}
 
 	sig := "TERM"
 	if cfg := entry.spec.ImageConfig; cfg != nil && cfg.Config.StopSignal != "" {
 		sig = cfg.Config.StopSignal
 	}
 
-	if err := s.rt.Kill(stopCtx, id, sig); err != nil {
+	s.log.Info("stopping container", "id", id, "signal", sig)
+
+	killCtx, kcancel := context.WithTimeout(context.Background(), 20*time.Second)
+	err := s.rt.Kill(killCtx, id, sig)
+	kcancel()
+	if err != nil {
 		s.log.Warn("graceful stop failed, forcing", "id", id, "err", err)
-		if err2 := s.rt.Kill(stopCtx, id, "KILL"); err2 != nil {
+		killCtx2, kcancel2 := context.WithTimeout(context.Background(), 20*time.Second)
+		err2 := s.rt.Kill(killCtx2, id, "KILL")
+		kcancel2()
+		if err2 != nil {
 			entry.mu.Lock()
 			entry.stopped = false
 			entry.mu.Unlock()
@@ -167,10 +191,15 @@ func (s *Supervisor) Stop(ctx context.Context, id string) error {
 	// tearing it down, `crun state` may never reach stopped and WaitStopped times out.
 	s.resetLogIO(entry)
 
-	if err := s.rt.WaitStopped(stopCtx, id); err != nil {
-		return fmt.Errorf("wait container stopped: %w", err)
+	waitCtx, wcancel := context.WithTimeout(context.Background(), waitBudget)
+	defer wcancel()
+	if err := s.waitStoppedOrForceDelete(waitCtx, id, "stop"); err != nil {
+		entry.mu.Lock()
+		entry.stopped = false
+		entry.mu.Unlock()
+		return err
 	}
-
+	s.log.Info("container stopped", "id", id)
 	return nil
 }
 
@@ -191,10 +220,10 @@ func (s *Supervisor) Kill(_ context.Context, id string, signal string) error {
 	entry.stopped = true
 	entry.mu.Unlock()
 
-	stopCtx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
-	defer cancel()
-
-	if err := s.rt.Kill(stopCtx, id, signal); err != nil {
+	killCtx, kcancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer kcancel()
+	s.log.Info("kill signal to container", "id", id, "signal", signal)
+	if err := s.rt.Kill(killCtx, id, signal); err != nil {
 		entry.mu.Lock()
 		entry.stopped = false
 		entry.mu.Unlock()
@@ -205,9 +234,15 @@ func (s *Supervisor) Kill(_ context.Context, id string, signal string) error {
 	// runtime state can move to stopped and network teardown can proceed.
 	s.resetLogIO(entry)
 
-	if err := s.rt.WaitStopped(stopCtx, id); err != nil {
-		return fmt.Errorf("wait container stopped: %w", err)
+	waitCtx, wcancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer wcancel()
+	if err := s.waitStoppedOrForceDelete(waitCtx, id, "kill"); err != nil {
+		entry.mu.Lock()
+		entry.stopped = false
+		entry.mu.Unlock()
+		return err
 	}
+	s.log.Info("container stopped after kill", "id", id, "signal", signal)
 	return nil
 }
 
@@ -290,6 +325,19 @@ func (s *Supervisor) ListInfo(_ context.Context) []ContainerInfo {
 
 // BaseDir returns the daemon data directory (e.g. /var/lib/nyxd).
 func (s *Supervisor) BaseDir() string { return s.baseDir }
+
+// ImageRefsInUse returns image references held by supervised containers (exact ContainerSpec.Image strings).
+func (s *Supervisor) ImageRefsInUse() map[string]struct{} {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make(map[string]struct{})
+	for _, e := range s.containers {
+		if r := strings.TrimSpace(e.spec.Image); r != "" {
+			out[r] = struct{}{}
+		}
+	}
+	return out
+}
 
 // Shutdown stops all containers gracefully.
 func (s *Supervisor) Shutdown(ctx context.Context) {

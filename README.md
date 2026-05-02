@@ -70,6 +70,10 @@ See **[docs/INSTALL.md](docs/INSTALL.md)** (Linux install, systemd, cross-build)
 
 API contract: **[docs/openapi.yaml](docs/openapi.yaml)**.
 
+## Daemon state (restart)
+
+The supervisor keeps **container metadata in memory** only. A **`nyxd` restart** does **not** reload running workloads from disk: you may need **`nyx rm`**, **`crun`**, or manual cleanup if the daemon died mid-flight. **crun** state under `…/run/crun` may still exist until removed. There is **no separate KV store** for supervisor state today.
+
 ## License
 
 This project is licensed under the **[PolyForm Noncommercial License 1.0.0](LICENSE)**.  
