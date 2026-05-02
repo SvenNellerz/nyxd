@@ -42,7 +42,7 @@ Go modules (see `go.mod`): OCI spec packages, `gopkg.in/yaml.v3`, `golang.org/x/
 - **Default:** `nyxd --net-driver=native` (implicit if omitted). No `/opt/cni/bin` required. Startup logs include `"network backend","driver":"native"`.
 - **Optional CNI:** `nyxd -net-driver=cni -cni-bin-dir=/opt/cni/bin ...` after installing plugins (e.g. `make install-cni`).
 - **Client:** `nyx` does not choose the driver; restart **`nyxd`** after changing flags.
-- **`nyx run`:** waits after start; **Ctrl+C** stops the container via the control API. Use **`nyx run -d`** for detach, or **`nyx stop <id>`**.
+- **`nyx run`:** foreground streams logs; **Ctrl+C** sends **SIGKILL** via the control API. Use **`nyx run -d`** for detach, **`nyx stop <id>`** for graceful stop, or **`nyx logs <id> -f`** from another shell.
 
 Full detail: **[docs/networking.md](docs/networking.md)**.
 
@@ -69,6 +69,15 @@ Create a tag whose name starts with `v` (for example `v0.2.0`) and push it to Gi
 See **[docs/INSTALL.md](docs/INSTALL.md)** (Linux install, systemd, cross-build) and **[docs/USAGE.md](docs/USAGE.md)** (`nyx` + `curl`).
 
 API contract: **[docs/openapi.yaml](docs/openapi.yaml)**.
+
+## License
+
+This project is licensed under the **[PolyForm Noncommercial License 1.0.0](LICENSE)**.  
+**Commercial use** outside the license’s permitted noncommercial purposes **is not allowed** without a **separate written agreement** with the copyright holder(s).
+
+## Contributing
+
+See **[CONTRIBUTING.md](CONTRIBUTING.md)** and the **[Code of Conduct](CODE_OF_CONDUCT.md)**. GitHub provides **bug report** and **feature request** issue forms under **New issue**.
 
 ## Security scans (repo checkout)
 

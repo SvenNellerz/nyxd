@@ -11,6 +11,8 @@
 | [qemu-alpine.md](qemu-alpine.md) | QEMU + Alpine 3.23 for safe testing |
 | [ROADMAP.md](ROADMAP.md) | Delivery checklist and gaps |
 
+Community: **[../CONTRIBUTING.md](../CONTRIBUTING.md)** · **[../CODE_OF_CONDUCT.md](../CODE_OF_CONDUCT.md)** · **[../LICENSE](../LICENSE)** (PolyForm Noncommercial 1.0.0)
+
 Scripts:
 
 - [`../scripts/qemu-alpine-nyxd.sh`](../scripts/qemu-alpine-nyxd.sh) — boot Alpine 3.23 virt ISO under QEMU  

@@ -18,8 +18,8 @@ info:
     **Errors:** many routes use `text/plain` bodies from `http.Error`; JSON endpoints return `application/json` on success.
   version: "1.0.0"
   license:
-    name: Apache-2.0
-    url: https://www.apache.org/licenses/LICENSE-2.0.html
+    name: PolyForm Noncommercial License 1.0.0
+    url: https://polyformproject.org/licenses/noncommercial/1.0.0/
 
 servers:
   - url: http://localhost

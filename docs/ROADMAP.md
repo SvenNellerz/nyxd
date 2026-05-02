@@ -6,8 +6,8 @@ Legend: `[x]` shipped in tree (still may need polish), `[ ]` not done, `[~]` par
 
 ## Already in the tree (high level)
 
-- [x] **OCI runtime shell-out** — `internal/runtime`: `crun` create/start/run (detach)/kill/delete/state/list, state JSON parsing, dedicated `--root` state dir.
-- [x] **Supervisor skeleton** — `internal/supervisor`: `Start` / `Stop` / `Remove` / `Shutdown`, restart policies, overlay + **network.Backend** setup + `bundle.Generate` + `crun run --detach`, supervised restart loop with backoff + jitter.
+- [x] **OCI runtime shell-out** — `internal/runtime`: `crun` create/start/run (`--detach` helper), **`run` foreground** (stdio attached), kill/delete/state/list, state JSON parsing, dedicated `--root` state dir.
+- [x] **Supervisor skeleton** — `internal/supervisor`: `Start` / `Stop` / `Kill` / `Remove` / `Shutdown`, restart policies, overlay + **network.Backend** setup + `bundle.Generate` + **`crun run` foreground** (stdio → log collector) with `resetLogIO` coordinated on stop/kill so `WaitStopped` can complete, supervised restart loop with backoff + jitter.
 - [x] **Image pull (Docker Hub–style)** — `internal/image`: `Store`, anonymous token auth, manifest (+ index) fetch, concurrent layer download with digest verify, atomic blob writes, `ParseRef`, `LoadImageMeta`, `LoadManifest`.
 - [x] **CNI exec path (optional)** — `internal/network`: when **`-net-driver=cni`**, conflist generation, `EnsureNetwork`, `Setup`/`Teardown` via plugin exec, netns under `/run/nyxd/netns`, portable `detachUnmount` for teardown. Default daemon mode uses **native** (no `/opt/cni/bin`).
 - [x] **Bundle / OCI config** — `internal/bundle`: `config.json` generation with default caps, masked paths, `noNewPrivileges`, cgroup resource mapping.
@@ -16,7 +16,7 @@ Legend: `[x]` shipped in tree (still may need polish), `[ ]` not done, `[~]` par
 - [x] **Logs** — `internal/logs`: JSONL append per container, `Tail` (reads whole file — see gaps).
 - [x] **Telemetry types** — `internal/telemetry`: counters + optional Prometheus-ish HTTP handler (`ServeMetrics`) — **not called from daemon today**.
 - [x] **Daemon entry** — `cmd/nyxd`: wiring for store, overlay, **`network.Backend`** (`-net-driver` **native** default or **cni**), runtime, log collector, supervisor; graceful shutdown context (30s); root check; **Unix socket HTTP control API** (`-socket`, default `/run/nyxd/nyxd.sock`); startup log **`network backend`** / **`driver`**; `go.sum` maintained via `go mod tidy`.
-- [x] **`nyx` CLI client** — `cmd/nyx`: `ping`, `version`, `pull` (streamed progress + summary by default, `--json` for single JSON), `run` (foreground: Ctrl+C → stop API; `-d`/`--detach`), `stop`, `exec`; `make build-nyx` → `bin/nyx`.
+- [x] **`nyx` CLI client** — `cmd/nyx`: `ping`, `version`, `pull` (streamed progress + summary by default, `--json` for single JSON), `run` (foreground: log follow + **Ctrl+C → `POST …/kill` SIGKILL**; `-d`/`--detach`), `ps`, `rm`, `stop`, `logs` (`-f` / `--tail`), `image ls` / `image rm`, `exec`, `container` aliases; `make build-nyx` → `bin/nyx`.
 - [x] **Unit tests** — compose parser, image ref parsing, native IPAM (Linux build); no end-to-end integration tests.
 - [x] **Docs / packaging** — [docs/README.md](README.md) index, **INSTALL** / **USAGE**, **OpenAPI**, [networking.md](networking.md), kernel requirements, native network internals, QEMU Alpine guide, example service units (`Type=simple` in `packaging/nyxd.service`, `Type=notify` in repo `nyxd.service` without `sd_notify` yet).
 
@@ -127,7 +127,7 @@ Legend: `[x]` shipped in tree (still may need polish), `[ ]` not done, `[~]` par
 
 - [ ] **Rotation by size** — `Rotate` exists but no max-size trigger; growth unbounded.
 - [ ] **`Tail` memory** — reads/decodes entire JSONL file then truncates to last *n* — unsafe for large logs.
-- [ ] **Follow mode** — no `nyxd logs -f` / streaming API.
+- [x] **Follow mode (API + client)** — `GET /v1/containers/{id}/logs?follow=1&tail=…&plain=…` (daemon tails JSONL file); **`nyx logs -f`** / **`nyx container logs -f`**; foreground **`nyx run`** streams the same endpoint.
 - [ ] **Alternate sinks** — JSONL to disk only; no syslog / journald forwarder interface.
 
 **Done / partial**
@@ -150,8 +150,8 @@ Legend: `[x]` shipped in tree (still may need polish), `[ ]` not done, `[~]` par
 
 **Yes:** `nyxd` starts an **HTTP server on a Unix domain socket** by default (`-socket=/run/nyxd/nyxd.sock`, override or set `-socket=""` to disable). The **`nyx`** binary is the thin client (`cmd/nyx`).
 
-- [x] **Socket server** — `internal/control`: `GET /v1/ping`, `GET /v1/version`, `GET /v1/containers`, `POST /v1/images/pull` (optional NDJSON stream), `POST /v1/containers/run`, `POST /v1/containers/{id}/stop`, `POST /v1/containers/{id}/exec`.
-- [x] **`nyx run` + stop** — `POST /v1/containers/run` then foreground CLI waits; **Ctrl+C** → **`POST /v1/containers/{id}/stop`**; **`nyx run -d`** detach; **`nyx stop`**. Resolves pulled image (`ResolvePulledImage`), builds `ContainerSpec`, **`supervisor.Start`**. Optional `restart` in JSON.
+- [x] **Socket server** — `internal/control`: `GET /v1/ping`, `GET /v1/version`, `GET /v1/containers`, `POST /v1/images/pull` (optional NDJSON stream), `GET /v1/images`, `POST /v1/images/remove`, `POST /v1/containers/run`, `POST /v1/containers/{id}/stop`, `POST /v1/containers/{id}/kill`, `GET /v1/containers/{id}/logs`, `POST /v1/containers/{id}/remove`, `POST /v1/containers/{id}/exec`.
+- [x] **`nyx run` + kill/stop** — `POST /v1/containers/run` then foreground CLI follows logs; **Ctrl+C** → **`POST /v1/containers/{id}/kill`** (SIGKILL); **`nyx run -d`** detach; **`nyx stop`** → **`/stop`** (graceful then force inside supervisor). Resolves pulled image (`ResolvePulledImage`), builds `ContainerSpec`, **`supervisor.Start`**. Optional `restart` in JSON.
 - [ ] **Auth / TLS** — socket is world-group writable (`0660`); no peer cred check, no token yet (local trust model only).
 - [ ] **Structured errors** — failed `exec` still begins `200` + stream body in some cases; tighten status codes and cap output size.
 
@@ -173,7 +173,7 @@ Legend: `[x]` shipped in tree (still may need polish), `[ ]` not done, `[~]` par
 
 ## API, clients & UI
 
-- [x] **OpenAPI spec** — [docs/openapi.yaml](openapi.yaml) documents `GET/POST /v1/*` on the Unix socket (schemas for pull stream, run, stop, exec). Regenerate or extend when handlers change; CI/SDK samples still TBD.
+- [x] **OpenAPI spec** — [docs/openapi.yaml](openapi.yaml) documents `GET/POST /v1/*` on the Unix socket (schemas for pull stream, run, stop, kill, logs, images list/remove, exec). Regenerate or extend when handlers change; CI/SDK samples still TBD.
 - [ ] **SDK samples** — small runnable examples (e.g. Go, Python, shell+curl) that call the API for pull, run, status, logs; live under `examples/` or docs and stay in sync with the spec.
 - [ ] **UI** — operator-facing web (or desktop) UI for host/node view, container lifecycle, compose stacks, log tail, and metrics; consumes the same API + optional WebSocket/SSE for streaming.
 
@@ -202,49 +202,4 @@ Legend: `[x]` shipped in tree (still may need polish), `[ ]` not done, `[~]` par
 - [x] **Small module footprint** — stdlib + `yaml.v3` + `x/sys` + OCI spec packages + **`hedzr/progressbar`** (nyx pull UI only) as in `go.mod`.
 
 ---
-
-## How to run the daemon and the `nyx` client
-
-1. **Build** (Linux, as root for real networking/overlay):
-
-   ```bash
-   make build
-   sudo ./bin/nyxd --log-level info
-   ```
-
-   or:
-
-   ```bash
-   sudo go run ./cmd/nyxd --log-level info
-   ```
-
-2. **Control API** — With defaults, the daemon listens on **`/run/nyxd/nyxd.sock`**. From another shell (root or user in group that can RW the socket):
-
-   ```bash
-   make build-nyx
-   ./bin/nyx ping
-   ./bin/nyx version
-   ./bin/nyx pull nginx:alpine
-   ./bin/nyx run nginx:alpine
-   ```
-
-3. **What you should see** — Daemon logs include **`network backend`** with **`driver":"native"`** (unless you set `-net-driver=cni`), then `daemon ready - awaiting workload` and `control API listening` when the socket bound. The process blocks until SIGINT/SIGTERM. See [networking.md](networking.md).
-
-4. **Running a workload** — After **`nyx pull <ref>`**, **`nyx run <ref>`** calls **`POST /v1/containers/run`** (default restart `unless-stopped`). The daemon resolves local image metadata + layer blobs, then **`supervisor.Start`** builds overlay, **networking** (default in-process native), bundle, and **`crun run --detach`**. By default the **CLI waits**; **Ctrl+C** calls **`POST /v1/containers/{id}/stop`**. Use **`nyx run -d`** to exit immediately after start, or **`nyx stop <id>`** from another shell. Use **`nyx exec <id> -- …`** for one-off commands inside the container.
-
-5. **Disable the socket** — `sudo ./bin/nyxd -socket="" …` if you do not want the control listener.
-
----
-
-## Suggested priority (opinionated)
-
-1. **nft / portmap follow-ups** — real rule handles + `removePortMappings`; fix IPAM `last` for non-/16 subnets.  
-2. **Supervisor**: integrate **health** + **`TopologicalOrder`** + optional global shutdown budget.  
-3. **Runtime**: `crun events` / pidfd instead of poll-only `WaitForExit`.  
-4. **Registry**: auth + platform + GC + resumable layers.  
-5. **SDK samples** → **UI** (OpenAPI baseline exists in `docs/openapi.yaml`).  
-6. **CI + integration tests** on Linux runners with crun + **networking** (native default or CNI when testing `-net-driver=cni`).
-
----
-
-*Last reviewed against repository layout on 2026-05-17. **Update `[x]` / `[~]` / `[ ]` when merging features** — keep this file aligned with shipped behavior (CLI flags, API routes, and daemon defaults).*
+*Last reviewed against repository layout on 2026-05-16. **Update `[x]` / `[~]` / `[ ]` when merging features** — keep this file aligned with shipped behavior (CLI flags, API routes, and daemon defaults).*
