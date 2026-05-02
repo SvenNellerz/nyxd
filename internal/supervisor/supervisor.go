@@ -175,15 +175,22 @@ func (s *Supervisor) Stop(ctx context.Context, id string) error {
 	err := s.rt.Kill(killCtx, id, sig)
 	kcancel()
 	if err != nil {
-		s.log.Warn("graceful stop failed, forcing", "id", id, "err", err)
-		killCtx2, kcancel2 := context.WithTimeout(context.Background(), 20*time.Second)
-		err2 := s.rt.Kill(killCtx2, id, "KILL")
-		kcancel2()
-		if err2 != nil {
-			entry.mu.Lock()
-			entry.stopped = false
-			entry.mu.Unlock()
-			return fmt.Errorf("kill container: %w", err2)
+		if runtime.CrunContainerAbsent(err) {
+			s.log.Warn("crun stop: OCI state missing on disk", "id", id, "err", err)
+		} else {
+			s.log.Warn("graceful stop failed, forcing", "id", id, "err", err)
+			killCtx2, kcancel2 := context.WithTimeout(context.Background(), 20*time.Second)
+			err2 := s.rt.Kill(killCtx2, id, "KILL")
+			kcancel2()
+			if err2 != nil && !runtime.CrunContainerAbsent(err2) {
+				entry.mu.Lock()
+				entry.stopped = false
+				entry.mu.Unlock()
+				return fmt.Errorf("kill container: %w", err2)
+			}
+			if err2 != nil {
+				s.log.Warn("crun KILL: OCI state missing on disk", "id", id, "err", err2)
+			}
 		}
 	}
 
@@ -223,11 +230,15 @@ func (s *Supervisor) Kill(_ context.Context, id string, signal string) error {
 	killCtx, kcancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer kcancel()
 	s.log.Info("kill signal to container", "id", id, "signal", signal)
-	if err := s.rt.Kill(killCtx, id, signal); err != nil {
-		entry.mu.Lock()
-		entry.stopped = false
-		entry.mu.Unlock()
-		return fmt.Errorf("kill container: %w", err)
+	err := s.rt.Kill(killCtx, id, signal)
+	if err != nil {
+		if !runtime.CrunContainerAbsent(err) {
+			entry.mu.Lock()
+			entry.stopped = false
+			entry.mu.Unlock()
+			return fmt.Errorf("kill container: %w", err)
+		}
+		s.log.Warn("crun kill: OCI state missing on disk; cancelling foreground run", "id", id, "err", err)
 	}
 
 	// Unblock the supervisor's foreground `crun run` (CommandContext(logCtx)) so
@@ -317,6 +328,8 @@ func (s *Supervisor) ListInfo(_ context.Context) []ContainerInfo {
 		info := ContainerInfo{ID: sn.id, Image: sn.img, IP: sn.ip, Status: "unknown"}
 		if st, err := s.rt.State(stateCtx, sn.id); err == nil && st != nil {
 			info.Status = st.Status
+		} else if err != nil && runtime.CrunContainerAbsent(err) {
+			info.Status = "absent"
 		}
 		out = append(out, info)
 	}
@@ -483,8 +496,11 @@ func (s *Supervisor) startOnce(ctx context.Context, e *containerEntry) error {
 				s.ovl.Remove(spec.ID) //nolint:errcheck
 				return fmt.Errorf("crun run: %w", err)
 			}
-			log.Info("container started", "image", spec.Image, "ip", ip)
-			return nil
+			// Foreground crun exited cleanly before we observed "running" (unexpected for a long-running workload).
+			logCancel()
+			s.teardownNetwork(ctx, spec.ID)
+			s.ovl.Remove(spec.ID) //nolint:errcheck
+			return fmt.Errorf("crun run: exited before container reached running state")
 		case <-tick.C:
 			st, err2 := s.rt.State(ctx, spec.ID)
 			if err2 == nil && st != nil && st.Status == "running" {

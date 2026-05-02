@@ -87,7 +87,8 @@ func (r *Runtime) Run(ctx context.Context, containerID, bundleDir string) error 
 
 // RunForeground runs the container in the foreground: crun blocks until the init
 // process exits. Container stdout/stderr are wired to the given writers (typically
-// pipes feeding a log collector). No --detach flag.
+// pipes feeding a log collector). No --detach flag. Uses --pid-file so OCI state
+// under --root matches detached runs (some crun versions rely on this for status).
 func (r *Runtime) RunForeground(ctx context.Context, containerID, bundleDir string, stdout, stderr io.Writer) error {
 	if stdout == nil {
 		stdout = io.Discard
@@ -95,10 +96,12 @@ func (r *Runtime) RunForeground(ctx context.Context, containerID, bundleDir stri
 	if stderr == nil {
 		stderr = io.Discard
 	}
+	pidFile := filepath.Join(r.rootDir, containerID+".pid")
 	cmd := exec.CommandContext(ctx, r.binary,
 		"--root", r.rootDir,
 		"run",
 		"--bundle", bundleDir,
+		"--pid-file", pidFile,
 		containerID,
 	)
 	cmd.Stdout = stdout
@@ -133,8 +136,10 @@ func (r *Runtime) Delete(ctx context.Context, containerID string, force bool) er
 	}
 	args = append(args, containerID)
 	err := r.run(ctx, args, nil)
-	// Clean up pid file.
-	os.Remove(filepath.Join(r.rootDir, containerID+".pid"))
+	_ = os.Remove(filepath.Join(r.rootDir, containerID+".pid"))
+	if err != nil && isCrunAbsent(err) {
+		return nil
+	}
 	return err
 }
 
@@ -181,7 +186,7 @@ func (r *Runtime) WaitForExit(ctx context.Context, containerID string) (int, err
 			if err != nil {
 				// Only treat as exit if crun no longer has this id (e.g. after delete).
 				// Transient state errors must not tear down a still-running container.
-				if isCrunNotFound(err) {
+				if isCrunAbsent(err) {
 					return -1, nil
 				}
 				continue
@@ -206,7 +211,7 @@ func (r *Runtime) WaitStopped(ctx context.Context, containerID string) error {
 		case <-ticker.C:
 			s, err := r.State(ctx, containerID)
 			if err != nil {
-				if isCrunNotFound(err) {
+				if isCrunAbsent(err) {
 					return nil
 				}
 				continue
@@ -218,17 +223,30 @@ func (r *Runtime) WaitStopped(ctx context.Context, containerID string) error {
 	}
 }
 
-func isCrunNotFound(err error) bool {
+func isCrunAbsent(err error) bool {
 	if err == nil {
 		return false
 	}
 	msg := strings.ToLower(err.Error())
-	return strings.Contains(msg, "not found") ||
+	if strings.Contains(msg, "not found") ||
 		strings.Contains(msg, "cannot find") ||
 		strings.Contains(msg, "could not find") ||
 		strings.Contains(msg, "does not exist") ||
 		strings.Contains(msg, "no such container") ||
-		strings.Contains(msg, "unable to find")
+		strings.Contains(msg, "unable to find") {
+		return true
+	}
+	// e.g. crun: error opening file '.../run/crun/<id>/status': No such file or directory
+	if strings.Contains(msg, "no such file or directory") && strings.Contains(msg, "status") {
+		return true
+	}
+	return false
+}
+
+// CrunContainerAbsent reports whether crun says this container id has no OCI state
+// under this runtime's --root (including a missing .../status file).
+func CrunContainerAbsent(err error) bool {
+	return isCrunAbsent(err)
 }
 
 func (r *Runtime) resolveExitCode(ctx context.Context, containerID string, s *State) int {
