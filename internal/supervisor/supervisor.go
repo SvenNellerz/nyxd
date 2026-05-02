@@ -163,6 +163,10 @@ func (s *Supervisor) Stop(ctx context.Context, id string) error {
 		}
 	}
 
+	// Foreground `crun run` (see startOnce) can stay attached to stdio pipes; without
+	// tearing it down, `crun state` may never reach stopped and WaitStopped times out.
+	s.resetLogIO(entry)
+
 	if err := s.rt.WaitStopped(stopCtx, id); err != nil {
 		return fmt.Errorf("wait container stopped: %w", err)
 	}
@@ -196,6 +200,10 @@ func (s *Supervisor) Kill(_ context.Context, id string, signal string) error {
 		entry.mu.Unlock()
 		return fmt.Errorf("kill container: %w", err)
 	}
+
+	// Unblock the supervisor's foreground `crun run` (CommandContext(logCtx)) so
+	// runtime state can move to stopped and network teardown can proceed.
+	s.resetLogIO(entry)
 
 	if err := s.rt.WaitStopped(stopCtx, id); err != nil {
 		return fmt.Errorf("wait container stopped: %w", err)
@@ -249,7 +257,7 @@ type ContainerInfo struct {
 }
 
 // ListInfo returns supervised containers with runtime status and network IP.
-func (s *Supervisor) ListInfo(ctx context.Context) []ContainerInfo {
+func (s *Supervisor) ListInfo(_ context.Context) []ContainerInfo {
 	s.mu.RLock()
 	type snap struct {
 		id, img, ip string
@@ -264,10 +272,15 @@ func (s *Supervisor) ListInfo(ctx context.Context) []ContainerInfo {
 
 	sort.Slice(snaps, func(i, j int) bool { return snaps[i].id < snaps[j].id })
 
+	// Do not use the HTTP request context for crun: if the client disconnects,
+	// we still want accurate status instead of "unknown" from a cancelled state call.
+	stateCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
 	out := make([]ContainerInfo, 0, len(snaps))
 	for _, sn := range snaps {
 		info := ContainerInfo{ID: sn.id, Image: sn.img, IP: sn.ip, Status: "unknown"}
-		if st, err := s.rt.State(ctx, sn.id); err == nil && st != nil {
+		if st, err := s.rt.State(stateCtx, sn.id); err == nil && st != nil {
 			info.Status = st.Status
 		}
 		out = append(out, info)
