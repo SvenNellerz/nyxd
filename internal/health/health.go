@@ -25,14 +25,14 @@ const (
 
 // Config defines how to check container health.
 type Config struct {
-	Type        Type
-	Command     []string      // for exec
-	URL         string        // for http: "http://127.0.0.1:8080/health"
-	Address     string        // for tcp: "127.0.0.1:8080"
-	Interval    time.Duration // time between checks
-	Timeout     time.Duration // per-check timeout
-	Retries     int           // consecutive failures before unhealthy
-	StartPeriod time.Duration // grace period before first check
+	Type        Type          `json:"type,omitempty"`
+	Command     []string      `json:"command,omitempty"`
+	URL         string        `json:"url,omitempty"`
+	Address     string        `json:"address,omitempty"`
+	Interval    time.Duration `json:"interval,omitempty"`
+	Timeout     time.Duration `json:"timeout,omitempty"`
+	Retries     int           `json:"retries,omitempty"`
+	StartPeriod time.Duration `json:"startPeriod,omitempty"`
 }
 
 // Status of a container's healthcheck.

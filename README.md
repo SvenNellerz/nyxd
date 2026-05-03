@@ -72,7 +72,14 @@ API contract: **[docs/openapi.yaml](docs/openapi.yaml)**.
 
 ## Daemon state (restart)
 
-The supervisor keeps **container metadata in memory** only. A **`nyxd` restart** does **not** reload running workloads from disk: you may need **`nyx rm`**, **`crun`**, or manual cleanup if the daemon died mid-flight. **crun** state under `…/run/crun` may still exist until removed. There is **no separate KV store** for supervisor state today.
+The supervisor keeps a **hot map in memory** and also writes one **JSON file per container** under `{baseDir}/supervisor/containers/<id>.json` after a container reaches **running** (full `ContainerSpec` plus netns, bundle, overlay merged path, and assigned IP).
+
+- **Graceful `nyxd` shutdown** (SIGTERM, etc.): `Shutdown` stops supervised containers; when they exit, those JSON files are **removed**. A clean restart therefore starts with an empty supervisor list unless something is re-adopted.
+- **Unclean stop** (e.g. `SIGKILL` to nyxd while crun keeps the workload running): the JSON files remain. On the **next** daemon start, **`reconcilePersisted`** re-registers any id whose record is still valid **and** `crun state` reports **running**, then resumes supervision so **`nyx ps`** shows them again.
+
+There is **no separate KV database** (Bolt, SQLite, …)—only these JSON records plus crun’s state under `{baseDir}/run/crun`.
+
+Containers started **before** this persistence shipped have **no** JSON record until they are started again at least once while running a build that writes state; until then, re-adoption after a crash cannot find metadata.
 
 ## License
 
@@ -124,6 +131,8 @@ make scan-grype
 │       └── merged/                 # container rootfs (mount point)
 ├── bundles/<containerID>/
 │   └── config.json               # OCI runtime-spec
+├── supervisor/containers/
+│   └── <containerID>.json        # persisted spec + paths (re-adopt after unclean restart)
 ├── run/crun/                     # crun state files
 └── logs/<containerID>.log        # JSONL container logs
 

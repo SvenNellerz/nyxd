@@ -91,7 +91,7 @@ type Supervisor struct {
 // (typically native in-process networking or the CNI exec [network.Manager]).
 // logColl may be nil (stdio is discarded and no log files are written).
 func New(rt *runtime.Runtime, ovl *overlay.Manager, net network.Backend, baseDir string, log *slog.Logger, logColl *logs.Collector) *Supervisor {
-	return &Supervisor{
+	s := &Supervisor{
 		rt:         rt,
 		ovl:        ovl,
 		net:        net,
@@ -100,6 +100,8 @@ func New(rt *runtime.Runtime, ovl *overlay.Manager, net network.Backend, baseDir
 		baseDir:    baseDir,
 		containers: make(map[string]*containerEntry),
 	}
+	s.reconcilePersisted()
+	return s
 }
 
 // Start launches a container according to its spec and supervises it.
@@ -529,6 +531,9 @@ func (s *Supervisor) startOnce(ctx context.Context, e *containerEntry) error {
 			st, err2 := s.rt.State(ctx, spec.ID)
 			if err2 == nil && st != nil && st.Status == "running" {
 				log.Info("container started", "image", spec.Image, "ip", ip)
+				if err := s.persistContainerEntry(e); err != nil {
+					log.Warn("persist supervisor state", "err", err)
+				}
 				return nil
 			}
 		case <-startDeadline.C:
@@ -573,6 +578,7 @@ func (s *Supervisor) supervise(ctx context.Context, e *containerEntry) {
 			s.mu.Lock()
 			delete(s.containers, e.spec.ID)
 			s.mu.Unlock()
+			s.removePersistedState(e.spec.ID)
 			return
 		}
 
@@ -583,6 +589,7 @@ func (s *Supervisor) supervise(ctx context.Context, e *containerEntry) {
 			s.mu.Lock()
 			delete(s.containers, e.spec.ID)
 			s.mu.Unlock()
+			s.removePersistedState(e.spec.ID)
 			return
 		}
 
@@ -645,6 +652,7 @@ func (s *Supervisor) cleanup(e *containerEntry) {
 		network.DeleteNetNS(e.spec.ID)                           //nolint:errcheck
 	}
 	s.ovl.Remove(e.spec.ID) //nolint:errcheck
+	s.removePersistedState(e.spec.ID)
 }
 
 func (s *Supervisor) resetLogIO(e *containerEntry) {

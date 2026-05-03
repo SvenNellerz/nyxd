@@ -40,7 +40,7 @@ sudo nyx image rm nginx:alpine
 sudo nyx image prune              # remove image metadata not referenced by any running container
 sudo nyx image prune --dry-run      # list what would be removed
 
-# Daemon restart: the supervisor does not persist container state; after an unclean stop you may need `nyx rm <id>` or manual crun cleanup. Image prune does not delete blob files (see roadmap).
+# Daemon restart: after a clean shutdown, supervised containers are stopped and JSON under `supervisor/containers/` is removed. After an unclean stop (e.g. nyxd SIGKILL) while crun still runs a workload, those JSON files re-seed `nyx ps` on the next start. Very old runs may lack JSON until recreated once on a current build.
 
 # Stop from another shell
 sudo nyx stop web
