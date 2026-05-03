@@ -130,6 +130,8 @@ func parseExecArgs(args []string) (id string, argv []string, err error) {
 	for i < len(args) {
 		a := args[i]
 		switch {
+		case a == "-it" || a == "-ti":
+			i++
 		case a == "-i" || a == "--interactive":
 			i++
 		case a == "-t" || a == "--tty":
@@ -144,7 +146,7 @@ func parseExecArgs(args []string) (id string, argv []string, err error) {
 	}
 done:
 	if i >= len(args) {
-		return "", nil, fmt.Errorf("usage: nyx exec [-i] [-t] <id> [--] <command> [args...]")
+		return "", nil, fmt.Errorf("usage: nyx exec [-i] [-t] [-it] <id> [--] <command> [args...]")
 	}
 	id = args[i]
 	rest := args[i+1:]
@@ -200,6 +202,7 @@ func doPS(socket string, args []string) error {
 			ID     string `json:"id"`
 			Image  string `json:"image"`
 			IP     string `json:"ip"`
+			Ports  string `json:"ports"`
 			Status string `json:"status"`
 		} `json:"items"`
 	}
@@ -214,11 +217,11 @@ func doPS(socket string, args []string) error {
 	}
 
 	if len(out.Items) == 0 {
-		fmt.Println("CONTAINER ID   IMAGE                          STATUS    IP")
+		fmt.Println("CONTAINER ID   IMAGE                          STATUS    PORTS                     IP")
 		return nil
 	}
 
-	fmt.Println("CONTAINER ID   IMAGE                          STATUS    IP")
+	fmt.Println("CONTAINER ID   IMAGE                          STATUS    PORTS                     IP")
 	for _, it := range out.Items {
 		cid := it.ID
 		if !noTrunc && len(cid) > 12 {
@@ -228,7 +231,14 @@ func doPS(socket string, args []string) error {
 		if len(img) > 30 {
 			img = img[:27] + "..."
 		}
-		fmt.Printf("%-14s %-30s %-9s %s\n", cid, img, it.Status, it.IP)
+		ports := it.Ports
+		if ports == "" {
+			ports = "-"
+		}
+		if len(ports) > 24 {
+			ports = ports[:21] + "..."
+		}
+		fmt.Printf("%-14s %-30s %-9s %-25s %s\n", cid, img, it.Status, ports, it.IP)
 	}
 	return nil
 }

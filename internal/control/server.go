@@ -173,6 +173,12 @@ func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "missing container id", http.StatusBadRequest)
 		return
 	}
+	canon, err := s.resolveContainerID(id)
+	if err != nil {
+		writeResolveError(w, err)
+		return
+	}
+	id = canon
 	var body execRequest
 	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&body); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -207,6 +213,12 @@ func (s *Server) handleContainerStop(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "missing container id", http.StatusBadRequest)
 		return
 	}
+	canon, err := s.resolveContainerID(id)
+	if err != nil {
+		writeResolveError(w, err)
+		return
+	}
+	id = canon
 	if err := s.sup.Stop(r.Context(), id); err != nil {
 		msg := err.Error()
 		if strings.Contains(msg, "not found") {
@@ -234,6 +246,12 @@ func (s *Server) handleContainerRemove(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "missing container id", http.StatusBadRequest)
 		return
 	}
+	canon, err := s.resolveContainerID(id)
+	if err != nil {
+		writeResolveError(w, err)
+		return
+	}
+	id = canon
 	if err := s.sup.Remove(r.Context(), id); err != nil {
 		msg := err.Error()
 		if strings.Contains(msg, "not found") {

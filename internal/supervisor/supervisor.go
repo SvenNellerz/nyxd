@@ -299,19 +299,43 @@ type ContainerInfo struct {
 	ID     string `json:"id"`
 	Image  string `json:"image"`
 	IP     string `json:"ip,omitempty"`
+	Ports  string `json:"ports,omitempty"`
 	Status string `json:"status"`
+}
+
+func formatPortMappings(pm []network.PortMapping) string {
+	if len(pm) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	for i, p := range pm {
+		if i > 0 {
+			b.WriteString(", ")
+		}
+		proto := strings.ToLower(strings.TrimSpace(p.Protocol))
+		if proto == "" {
+			proto = "tcp"
+		}
+		fmt.Fprintf(&b, "0.0.0.0:%d->%d/%s", p.HostPort, p.ContainerPort, proto)
+	}
+	return b.String()
 }
 
 // ListInfo returns supervised containers with runtime status and network IP.
 func (s *Supervisor) ListInfo(_ context.Context) []ContainerInfo {
 	s.mu.RLock()
 	type snap struct {
-		id, img, ip string
+		id, img, ip, ports string
 	}
 	var snaps []snap
 	for id, e := range s.containers {
 		e.mu.Lock()
-		snaps = append(snaps, snap{id: id, img: e.spec.Image, ip: e.ip})
+		snaps = append(snaps, snap{
+			id:    id,
+			img:   e.spec.Image,
+			ip:    e.ip,
+			ports: formatPortMappings(e.spec.PortMappings),
+		})
 		e.mu.Unlock()
 	}
 	s.mu.RUnlock()
@@ -325,7 +349,7 @@ func (s *Supervisor) ListInfo(_ context.Context) []ContainerInfo {
 
 	out := make([]ContainerInfo, 0, len(snaps))
 	for _, sn := range snaps {
-		info := ContainerInfo{ID: sn.id, Image: sn.img, IP: sn.ip, Status: "unknown"}
+		info := ContainerInfo{ID: sn.id, Image: sn.img, IP: sn.ip, Ports: sn.ports, Status: "unknown"}
 		if st, err := s.rt.State(stateCtx, sn.id); err == nil && st != nil {
 			info.Status = st.Status
 		} else if err != nil && runtime.CrunContainerAbsent(err) {

@@ -106,8 +106,11 @@ func Setup(ctx context.Context, containerID, netNSPath string, ports []network.P
 	// 5. Port mappings
 	if len(ports) > 0 {
 		if err := addPortMappings(containerID, ip, ports, log); err != nil {
-			log.Warn("port mappings", "container", containerID, "err", err)
-			// Non-fatal — container runs, ports just won't be forwarded
+			// Roll back host networking so we do not leave a running container without published ports
+			// while the user believes -p succeeded.
+			deleteLink(hostVeth) //nolint:errcheck
+			getIPAM().release(containerID)
+			return "", fmt.Errorf("port mappings: %w", err)
 		}
 	}
 
@@ -451,20 +454,51 @@ func (a *ipam) usedSet() map[uint32]bool {
 // portmapState tracks nftables rules per container for cleanup.
 var portmapState sync.Map // containerID → []string (rule handles)
 
+// tryEnsureNATOutputChain adds the output NAT hook if missing (older nyxd
+// installs only created prerouting/postrouting).
+func tryEnsureNATOutputChain() error {
+	if err := ensureNftTable(); err != nil {
+		return err
+	}
+	return withTimeout(30*time.Second, func() error {
+		cmd := exec.Command("/usr/sbin/nft", "add", "chain", "ip", "nyxd-nat", "output",
+			"{", "type", "nat", "hook", "output", "priority", "-100", ";", "policy", "accept", ";", "}")
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			s := strings.ToLower(strings.TrimSpace(string(out)))
+			if strings.Contains(s, "file exists") || strings.Contains(s, "exists") {
+				return nil
+			}
+			return fmt.Errorf("nft add chain output: %w: %s", err, strings.TrimSpace(string(out)))
+		}
+		return nil
+	})
+}
+
 // addPortMappings installs PREROUTING DNAT + POSTROUTING MASQUERADE rules
 // using nft via the nftables netlink API (no nft binary required).
 // For simplicity we shell out to nft here — pure netlink nftables is 1000+ lines.
 // The nft binary is tiny (part of nftables package) and has no CVE history.
 func addPortMappings(containerID, containerIP string, ports []network.PortMapping, log *slog.Logger) error {
+	if err := tryEnsureNATOutputChain(); err != nil {
+		return err
+	}
+	var errs []error
 	for _, p := range ports {
 		proto := p.Protocol
 		if proto == "" {
 			proto = "tcp"
 		}
 
-		// DNAT: incoming host:HostPort → containerIP:ContainerPort
-		dnat := fmt.Sprintf(
+		// DNAT for traffic arriving from outside the host (PREROUTING) and for
+		// locally originated connections to 127.0.0.1:HostPort (OUTPUT).
+		dnatPre := fmt.Sprintf(
 			"nft add rule ip nyxd-nat prerouting "+
+				"%s dport %d dnat to %s:%d",
+			proto, p.HostPort, containerIP, p.ContainerPort,
+		)
+		dnatOut := fmt.Sprintf(
+			"nft add rule ip nyxd-nat output "+
 				"%s dport %d dnat to %s:%d",
 			proto, p.HostPort, containerIP, p.ContainerPort,
 		)
@@ -475,11 +509,15 @@ func addPortMappings(containerID, containerIP string, ports []network.PortMappin
 			containerIP, proto, p.ContainerPort,
 		)
 
-		for _, rule := range []string{dnat, hairpin} {
+		for _, rule := range []string{dnatPre, dnatOut, hairpin} {
 			if err := runNft(rule); err != nil {
 				log.Warn("nft rule", "rule", rule, "err", err)
+				errs = append(errs, err)
 			}
 		}
+	}
+	if len(errs) > 0 {
+		return fmt.Errorf("nft: %v", errs)
 	}
 	return nil
 }
@@ -515,6 +553,9 @@ func ensureNftTable() error {
 table ip nyxd-nat {
   chain prerouting {
     type nat hook prerouting priority dstnat; policy accept;
+  }
+  chain output {
+    type nat hook output priority -100; policy accept;
   }
   chain postrouting {
     type nat hook postrouting priority srcnat; policy accept;

@@ -29,6 +29,12 @@ func (s *Server) handleContainerKill(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "missing container id", http.StatusBadRequest)
 		return
 	}
+	canon, err := s.resolveContainerID(id)
+	if err != nil {
+		writeResolveError(w, err)
+		return
+	}
+	id = canon
 	signal := "KILL"
 	var body struct {
 		Signal string `json:"signal"`
@@ -61,6 +67,12 @@ func (s *Server) handleContainerLogs(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "missing container id", http.StatusBadRequest)
 		return
 	}
+	canon, err := s.resolveContainerID(id)
+	if err != nil {
+		writeResolveError(w, err)
+		return
+	}
+	id = canon
 	logPath := filepath.Join(s.dataDir, "logs", id+".log")
 	tail := 200
 	if v := r.URL.Query().Get("tail"); v != "" {
