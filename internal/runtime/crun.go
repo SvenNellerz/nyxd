@@ -297,12 +297,16 @@ func (r *Runtime) exitCodeFromRawState(ctx context.Context, containerID string) 
 }
 
 // Exec runs a one-shot process inside a running container (crun exec).
-func (r *Runtime) Exec(ctx context.Context, containerID string, argv []string, stdout, stderr io.Writer) error {
+// If stdin is non-nil, it is wired to crun's stdin (streaming).
+func (r *Runtime) Exec(ctx context.Context, containerID string, argv []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	if len(argv) == 0 {
 		return fmt.Errorf("exec: empty argv")
 	}
 	args := append([]string{"--root", r.rootDir, "exec", "--", containerID}, argv...)
 	cmd := exec.CommandContext(ctx, r.binary, args...)
+	if stdin != nil {
+		cmd.Stdin = stdin
+	}
 	switch {
 	case stdout != nil && stderr != nil:
 		cmd.Stdout = stdout

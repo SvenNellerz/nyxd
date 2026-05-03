@@ -24,6 +24,9 @@ func defaultSocket() string {
 	return "/run/nyxd/nyxd.sock"
 }
 
+// mimeExecStreamV1 must match internal/control for streaming stdin (nyx exec -i).
+const mimeExecStreamV1 = "application/x-nyxd-exec+v1"
+
 func main() {
 	if err := run(os.Args[1:]); err != nil {
 		fmt.Fprintf(os.Stderr, "nyx: %v\n", err)
@@ -110,7 +113,7 @@ Commands:
   image rm <ref> [<ref>...]   remove image metadata (POST /v1/images/remove)
   image prune [--dry-run|-n]   remove pulled images not used by any running container
   container <ls|list|rm|logs>   aliases for ps / rm / logs
-  exec [-i] [-t] [-it] <id> [--] <argv...>   exec in container (-it = -i -t; TTY not implemented)
+  exec [-i] [-t] [-it] <id> [--] <argv...>   exec in container (-i streams stdin; -t accepted, no PTY yet)
 
 Environment:
   NYXD_SOCKET   default control socket (default %s)
@@ -291,19 +294,43 @@ func doStopWithContext(ctx context.Context, socket, id string) error {
 }
 
 func doExec(socket string, args []string) error {
-	id, argv, err := parseExecArgs(args)
+	opts, err := parseExecArgs(args)
 	if err != nil {
 		return err
 	}
 
 	c := httpClient(socket)
-	body, _ := json.Marshal(map[string][]string{"argv": argv})
-	u := fmt.Sprintf("http://unix/v1/containers/%s/exec", url.PathEscape(id))
-	req, err := http.NewRequest(http.MethodPost, u, bytes.NewReader(body))
-	if err != nil {
-		return err
+	u := fmt.Sprintf("http://unix/v1/containers/%s/exec", url.PathEscape(opts.ID))
+
+	var req *http.Request
+	if opts.AttachStdin {
+		pr, pw := io.Pipe()
+		hdr, err := json.Marshal(map[string][]string{"argv": opts.Argv})
+		if err != nil {
+			return err
+		}
+		go func() {
+			if _, werr := pw.Write(append(hdr, '\n')); werr != nil {
+				_ = pw.CloseWithError(werr)
+				return
+			}
+			_, copyErr := io.Copy(pw, os.Stdin)
+			_ = pw.CloseWithError(copyErr)
+		}()
+		req, err = http.NewRequest(http.MethodPost, u, pr)
+		if err != nil {
+			return err
+		}
+		req.Header.Set("Content-Type", mimeExecStreamV1)
+	} else {
+		body, _ := json.Marshal(map[string][]string{"argv": opts.Argv})
+		req, err = http.NewRequest(http.MethodPost, u, bytes.NewReader(body))
+		if err != nil {
+			return err
+		}
+		req.Header.Set("Content-Type", "application/json")
 	}
-	req.Header.Set("Content-Type", "application/json")
+
 	resp, err := c.Do(req)
 	if err != nil {
 		return err

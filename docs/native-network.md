@@ -84,12 +84,22 @@ table ip nyxd-nat {
     # per-container DNAT rules added here:
     # tcp dport 8080 dnat to 10.88.0.3:80
   }
+  chain output {
+    type nat hook output priority -100; policy accept;
+    # same DNAT rules duplicated here so traffic to 127.0.0.1:8080 is rewritten
+  }
   chain postrouting {
     type nat hook postrouting priority srcnat; policy accept;
     oifname "nyxbr0" masquerade   # outbound container traffic
   }
 }
 ```
+
+On daemon start, **native** mode best-effort enables **`net.ipv4.conf.all.route_localnet=1`**
+(and `default`) so IPv4 **localhost → published port → container** DNAT is actually routed.
+Without that sysctl, `curl http://127.0.0.1:<hostPort>` often fails while the same port from another machine works.
+
+**IPv6:** published ports are IPv4-only today; use `curl -4` or `http://127.0.0.1:...` if your resolver prefers `::1` for `localhost`.
 
 ## Switching between native and exec CNI
 

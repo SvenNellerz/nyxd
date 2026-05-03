@@ -212,6 +212,10 @@ paths:
       description: |
         Streams combined stdout/stderr as raw bytes (`application/octet-stream`).
         The HTTP connection stays open until the exec completes.
+
+        Body variants:
+        - `application/json` — `ExecRequest` only (stdin closed).
+        - `application/x-nyxd-exec+v1` — first line is JSON `ExecRequest` plus newline; remaining bytes stream to `crun exec` stdin (used by `nyx exec -i`).
       operationId: execInContainer
       parameters:
         - name: id
@@ -225,6 +229,11 @@ paths:
           application/json:
             schema:
               $ref: "#/components/schemas/ExecRequest"
+          application/x-nyxd-exec+v1:
+            schema:
+              type: string
+              format: binary
+            description: JSON header line (ExecRequest) then raw stdin until EOF.
       responses:
         "200":
           description: Raw command output (stream)

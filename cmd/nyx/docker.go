@@ -125,42 +125,55 @@ doneFlags:
 	return o, nil
 }
 
-func parseExecArgs(args []string) (id string, argv []string, err error) {
+// execCLIOptions is the result of parsing `nyx exec` arguments.
+type execCLIOptions struct {
+	ID           string
+	Argv         []string
+	AttachStdin  bool
+	WantTTY      bool // accepted for docker-compat; crun TTY not wired server-side
+}
+
+func parseExecArgs(args []string) (execCLIOptions, error) {
+	var o execCLIOptions
 	i := 0
 	for i < len(args) {
 		a := args[i]
 		switch {
 		case a == "-it" || a == "-ti":
+			o.AttachStdin = true
+			o.WantTTY = true
 			i++
 		case a == "-i" || a == "--interactive":
+			o.AttachStdin = true
 			i++
 		case a == "-t" || a == "--tty":
+			o.WantTTY = true
 			i++
 		case (a == "-w" || a == "--workdir") && i+1 < len(args):
 			i += 2
 		case strings.HasPrefix(a, "-"):
-			return "", nil, fmt.Errorf("unknown exec flag %q (only -i/-t/-w are accepted; TTY is not implemented)", a)
+			return o, fmt.Errorf("unknown exec flag %q (only -i/-t/-w are accepted; TTY is not implemented server-side)", a)
 		default:
 			goto done
 		}
 	}
 done:
 	if i >= len(args) {
-		return "", nil, fmt.Errorf("usage: nyx exec [-i] [-t] [-it] <id> [--] <command> [args...]")
+		return o, fmt.Errorf("usage: nyx exec [-i] [-t] [-it] <id> [--] <command> [args...]")
 	}
-	id = args[i]
+	o.ID = args[i]
 	rest := args[i+1:]
-	argv = rest
+	o.Argv = rest
 	for j, a := range rest {
 		if a == "--" {
-			argv = rest[j+1:]
+			o.Argv = rest[j+1:]
 			break
 		}
 	}
-	if len(argv) == 0 {
-		return "", nil, fmt.Errorf("missing command after container id")
+	if len(o.Argv) == 0 {
+		return o, fmt.Errorf("missing command after container id")
 	}
-	return id, argv, nil
+	return o, nil
 }
 
 func doPS(socket string, args []string) error {

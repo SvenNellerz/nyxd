@@ -36,6 +36,20 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// tryEnableRouteLocalnet allows IPv4 DNAT from 127.0.0.1 to a bridge-routed
+// container IP (nft output/prerouting) to be forwarded; without it, published
+// ports often work from other hosts but not from curl http://localhost:PORT.
+func tryEnableRouteLocalnet(log *slog.Logger) {
+	for _, p := range []string{
+		"/proc/sys/net/ipv4/conf/all/route_localnet",
+		"/proc/sys/net/ipv4/conf/default/route_localnet",
+	} {
+		if err := os.WriteFile(p, []byte("1\n"), 0o644); err != nil {
+			log.Warn("route_localnet", "path", p, "err", err)
+		}
+	}
+}
+
 const (
 	// BridgeName is the host-side bridge interface for all nyxd containers.
 	BridgeName = "nyxbr0"

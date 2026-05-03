@@ -42,6 +42,7 @@ func (m *Manager) EnsureNetwork() error {
 	if err := ensureBridge(m.log); err != nil {
 		return fmt.Errorf("ensure bridge: %w", err)
 	}
+	tryEnableRouteLocalnet(m.log)
 	ensureNftTable()
 	m.log.Info("nyx network ready", "bridge", BridgeName, "gateway", GatewayIP)
 	return nil

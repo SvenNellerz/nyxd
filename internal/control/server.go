@@ -3,8 +3,11 @@
 package control
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -21,6 +24,10 @@ import (
 	"github.com/zrougamed/nyxd/internal/runtime"
 	"github.com/zrougamed/nyxd/internal/supervisor"
 )
+
+// mimeExecStreamV1 request body: one JSON line {"argv":[...]}\n then bytes streamed to
+// crun exec stdin until the client closes the body (nyx exec -i).
+const mimeExecStreamV1 = "application/x-nyxd-exec+v1"
 
 // Lister optionally lists supervised container IDs.
 type Lister interface {
@@ -167,6 +174,34 @@ type execRequest struct {
 	Argv []string `json:"argv"`
 }
 
+type flushWriter struct{ http.ResponseWriter }
+
+func (fw *flushWriter) Write(p []byte) (int, error) {
+	n, err := fw.ResponseWriter.Write(p)
+	if f, ok := fw.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+	return n, err
+}
+
+func readExecJSONLine(br *bufio.Reader, max int) ([]byte, error) {
+	line, err := br.ReadBytes('\n')
+	if len(line) > max {
+		return nil, fmt.Errorf("exec header line exceeds %d bytes", max)
+	}
+	s := bytes.TrimSpace(line)
+	if len(s) == 0 {
+		if err != nil && !errors.Is(err, io.EOF) {
+			return nil, err
+		}
+		return nil, fmt.Errorf("empty exec header line")
+	}
+	if err != nil && !errors.Is(err, io.EOF) {
+		return nil, err
+	}
+	return s, nil
+}
+
 func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
 	id := strings.TrimSpace(r.PathValue("id"))
 	if id == "" {
@@ -179,11 +214,31 @@ func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id = canon
+
 	var body execRequest
-	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&body); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
+	var stdin io.Reader
+
+	ct := strings.TrimSpace(strings.ToLower(r.Header.Get("Content-Type")))
+	switch {
+	case ct == mimeExecStreamV1:
+		br := bufio.NewReader(r.Body)
+		hdr, err := readExecJSONLine(br, 1<<20)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if err := json.Unmarshal(hdr, &body); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		stdin = br
+	default:
+		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&body); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
 	}
+
 	if len(body.Argv) == 0 {
 		http.Error(w, "empty argv", http.StatusBadRequest)
 		return
@@ -194,7 +249,11 @@ func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.WriteHeader(http.StatusOK)
-	if err := s.rt.Exec(r.Context(), id, body.Argv, w, w); err != nil {
+	if f, ok := w.(http.Flusher); ok {
+		f.Flush()
+	}
+	fw := &flushWriter{ResponseWriter: w}
+	if err := s.rt.Exec(r.Context(), id, body.Argv, stdin, fw, fw); err != nil {
 		s.log.Warn("control exec", "id", id, "err", err)
 	}
 }
