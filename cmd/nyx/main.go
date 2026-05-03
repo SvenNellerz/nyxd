@@ -98,7 +98,7 @@ Commands:
   ping              GET /v1/ping
   version           GET /v1/version
   pull [--json] <ref>   streamed progress + summary (use --json for raw JSON)
-  run [flags] <image> [-- <argv...>]   start container
+  run [flags] <image> [-- <argv...>]   start container (-d prints id; --json for full JSON)
       Foreground (no -d): stream container logs; Ctrl+C sends SIGKILL.
       Flags:
         -p, --publish HOST:CONTAINER[/tcp|/udp]   (repeatable; e.g. -p 8080:80)
@@ -207,21 +207,30 @@ func doRun(socket string, args []string) error {
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("run: %s: %s", resp.Status, bytes.TrimSpace(b))
 	}
-	os.Stdout.Write(b)
-	if len(b) > 0 && b[len(b)-1] != '\n' {
-		fmt.Println()
-	}
 
 	var out struct {
-		OK bool   `json:"ok"`
-		ID string `json:"id"`
+		OK    bool   `json:"ok"`
+		ID    string `json:"id"`
+		Image string `json:"image"`
 	}
 	if err := json.Unmarshal(b, &out); err != nil || !out.OK || out.ID == "" {
-		return nil
+		return fmt.Errorf("run: bad response: %s", bytes.TrimSpace(b))
 	}
+
 	if o.detach {
+		if o.jsonOut {
+			os.Stdout.Write(b)
+			if len(b) > 0 && b[len(b)-1] != '\n' {
+				fmt.Println()
+			}
+		} else {
+			fmt.Println(out.ID)
+		}
 		return nil
 	}
+
+	// Foreground: show id (human-readable; use --json on the client if you need full JSON).
+	fmt.Println(out.ID)
 
 	logCtx, logCancel := context.WithCancel(context.Background())
 	defer logCancel()

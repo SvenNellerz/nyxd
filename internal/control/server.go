@@ -446,8 +446,16 @@ func (s *Server) handleContainerRun(w http.ResponseWriter, r *http.Request) {
 
 	m, cfg, paths, err := s.store.ResolvePulledImage(image)
 	if err != nil {
-		http.Error(w, "resolve image (pull first): "+err.Error(), http.StatusBadRequest)
-		return
+		s.log.Info("pulling image for run", "ref", image, "err", err)
+		if _, errP := s.store.PullWithProgress(baseCtx, image, nil); errP != nil {
+			http.Error(w, "pull image: "+errP.Error(), http.StatusBadGateway)
+			return
+		}
+		m, cfg, paths, err = s.store.ResolvePulledImage(image)
+		if err != nil {
+			http.Error(w, "resolve image after pull: "+err.Error(), http.StatusBadGateway)
+			return
+		}
 	}
 
 	var portMaps []network.PortMapping

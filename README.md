@@ -75,7 +75,7 @@ API contract: **[docs/openapi.yaml](docs/openapi.yaml)**.
 The supervisor keeps a **hot map in memory** and also writes one **JSON file per container** under `{baseDir}/supervisor/containers/<id>.json` after a container reaches **running** (full `ContainerSpec` plus netns, bundle, overlay merged path, and assigned IP).
 
 - **Graceful `nyxd` shutdown** (SIGTERM, etc.): `Shutdown` stops supervised containers; when they exit, those JSON files are **removed**. A clean restart therefore starts with an empty supervisor list unless something is re-adopted.
-- **Unclean stop** (e.g. `SIGKILL` to nyxd while crun keeps the workload running): the JSON files remain. On the **next** daemon start, **`reconcilePersisted`** re-registers any id whose record is still valid **and** `crun state` reports **running**, then resumes supervision so **`nyx ps`** shows them again.
+- **Unclean stop** (e.g. `SIGKILL` to nyxd while crun keeps the workload running): on the **next** start, **`reconcilePersisted`** reloads `supervisor/containers/*.json` when crun still reports **running**. If that JSON is missing or corrupt, **`reconcileCrunOrphans`** falls back to **`bundles/<id>/nyxd-meta.json`** plus netns/overlay/crun state so **`nyx ps`** can still recover the container (requires the image to still be resolvable in the local store).
 
 There is **no separate KV database** (Bolt, SQLite, …)—only these JSON records plus crun’s state under `{baseDir}/run/crun`.
 
@@ -130,10 +130,13 @@ make scan-grype
 │       ├── work/                   # overlayfs workdir
 │       └── merged/                 # container rootfs (mount point)
 ├── bundles/<containerID>/
-│   └── config.json               # OCI runtime-spec
+│   ├── config.json               # OCI runtime-spec
+│   └── nyxd-meta.json            # image + publish + IP (re-adopt if supervisor JSON missing)
 ├── supervisor/containers/
 │   └── <containerID>.json        # persisted spec + paths (re-adopt after unclean restart)
-├── run/crun/                     # crun state files
+├── run/
+│   ├── crun/                     # crun --root state
+│   └── nyxd-daemon.lock          # exclusive flock: one nyxd per base-dir
 └── logs/<containerID>.log        # JSONL container logs
 
 /run/nyxd/netns/<containerID>  # network namespace bind-mounts

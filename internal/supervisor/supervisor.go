@@ -19,6 +19,7 @@ import (
 
 	"github.com/zrougamed/nyxd/internal/bundle"
 	"github.com/zrougamed/nyxd/internal/health"
+	"github.com/zrougamed/nyxd/internal/image"
 	"github.com/zrougamed/nyxd/internal/logs"
 	"github.com/zrougamed/nyxd/internal/network"
 	"github.com/zrougamed/nyxd/internal/overlay"
@@ -78,6 +79,7 @@ type Supervisor struct {
 	rt       *runtime.Runtime
 	ovl      *overlay.Manager
 	net      network.Backend
+	imgStore *image.Store // optional: re-adopt orphans via ResolvePulledImage
 	logColl  *logs.Collector
 	log      *slog.Logger
 	baseDir  string // /var/lib/nyxd
@@ -90,17 +92,21 @@ type Supervisor struct {
 // New constructs a Supervisor. net must implement [network.Backend]
 // (typically native in-process networking or the CNI exec [network.Manager]).
 // logColl may be nil (stdio is discarded and no log files are written).
-func New(rt *runtime.Runtime, ovl *overlay.Manager, net network.Backend, baseDir string, log *slog.Logger, logColl *logs.Collector) *Supervisor {
+// imgStore may be nil; when set, the supervisor can re-adopt running crun containers
+// after restart using bundle nyxd-meta.json when supervisor JSON is missing.
+func New(rt *runtime.Runtime, ovl *overlay.Manager, net network.Backend, baseDir string, log *slog.Logger, logColl *logs.Collector, imgStore *image.Store) *Supervisor {
 	s := &Supervisor{
 		rt:         rt,
 		ovl:        ovl,
 		net:        net,
+		imgStore:   imgStore,
 		logColl:    logColl,
 		log:        log,
 		baseDir:    baseDir,
 		containers: make(map[string]*containerEntry),
 	}
 	s.reconcilePersisted()
+	s.reconcileCrunOrphans()
 	return s
 }
 
@@ -454,6 +460,19 @@ func (s *Supervisor) startOnce(ctx context.Context, e *containerEntry) error {
 	}
 	e.bundleDir = bundleDir
 
+	meta := bundleRunMeta{
+		Image:    spec.Image,
+		IP:       ip,
+		Env:      spec.Env,
+		Args:     spec.Args,
+		Hostname: spec.Hostname,
+		Restart:  string(spec.RestartPolicy),
+		Publish:  portMappingsToPublishStrings(spec.PortMappings),
+	}
+	if err := writeBundleRunMeta(bundleDir, meta); err != nil {
+		log.Warn("write bundle meta", "err", err)
+	}
+
 	// 4. crun run (foreground): stdio piped to log collector JSONL files.
 	e.mu.Lock()
 	if e.logCancel != nil {
@@ -652,6 +671,7 @@ func (s *Supervisor) cleanup(e *containerEntry) {
 		network.DeleteNetNS(e.spec.ID)                           //nolint:errcheck
 	}
 	s.ovl.Remove(e.spec.ID) //nolint:errcheck
+	removeBundleMeta(e.bundleDir)
 	s.removePersistedState(e.spec.ID)
 }
 

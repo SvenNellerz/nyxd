@@ -19,6 +19,7 @@ type runOpts struct {
 	image    string
 	cmdArgs  []string
 	detach   bool
+	jsonOut  bool // print full JSON response (default: id only when -d)
 	env      []string
 	hostname string
 	restart  string
@@ -33,6 +34,9 @@ func parseRunArgs(args []string) (runOpts, error) {
 		switch {
 		case a == "-d" || a == "--detach":
 			o.detach = true
+			i++
+		case a == "--json" || a == "-json":
+			o.jsonOut = true
 			i++
 		case a == "-p" || a == "--publish":
 			if i+1 >= len(args) {

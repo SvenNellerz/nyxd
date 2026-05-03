@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/zrougamed/nyxd/internal/network"
 	"github.com/zrougamed/nyxd/internal/runtime"
 )
 
@@ -164,6 +165,115 @@ func (s *Supervisor) reconcilePersisted() {
 		s.log.Info("re-adopted supervised container from disk", "id", id, "image", rec.Spec.Image, "ip", rec.IP)
 		s.wg.Add(1)
 		// Daemon-lifetime context: reconcile's short-lived ctx must not cancel supervision.
+		go s.supervise(context.Background(), entry)
+	}
+}
+
+// reconcileCrunOrphans picks up containers that are still running in crun after
+// an unclean nyxd restart but have no (or unusable) supervisor JSON — typically
+// when nyxd-meta.json exists under the bundle dir and overlay/netns are present.
+func (s *Supervisor) reconcileCrunOrphans() {
+	if s.imgStore == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	states, err := s.rt.List(ctx)
+	if err != nil {
+		s.log.Warn("crun orphan reconcile: list", "err", err)
+		return
+	}
+
+	for _, st := range states {
+		if st.Status != "running" {
+			continue
+		}
+		id := strings.TrimSpace(st.ID)
+		if id == "" {
+			continue
+		}
+
+		s.mu.RLock()
+		_, exists := s.containers[id]
+		s.mu.RUnlock()
+		if exists {
+			continue
+		}
+
+		bundleDir := strings.TrimSpace(st.Bundle)
+		if bundleDir == "" {
+			bundleDir = filepath.Join(s.baseDir, "bundles", id)
+		}
+		meta, err := readBundleRunMeta(bundleDir)
+		if err != nil {
+			s.log.Debug("crun orphan reconcile: skip (no bundle meta)", "id", id, "err", err)
+			continue
+		}
+
+		nsPath := filepath.Join("/run/nyxd/netns", id)
+		if _, err := os.Stat(nsPath); err != nil {
+			s.log.Debug("crun orphan reconcile: skip (no netns)", "id", id)
+			continue
+		}
+		merged := filepath.Join(s.baseDir, "overlay", id, "merged")
+		if _, err := os.Stat(merged); err != nil {
+			s.log.Debug("crun orphan reconcile: skip (no overlay merged)", "id", id)
+			continue
+		}
+
+		m, cfg, paths, err := s.imgStore.ResolvePulledImage(meta.Image)
+		if err != nil {
+			s.log.Warn("crun orphan reconcile: resolve image", "id", id, "image", meta.Image, "err", err)
+			continue
+		}
+
+		var portMaps []network.PortMapping
+		for _, pub := range meta.Publish {
+			p, err := network.ParseDockerPublish(pub)
+			if err != nil {
+				s.log.Warn("crun orphan reconcile: publish", "id", id, "pub", pub, "err", err)
+				continue
+			}
+			portMaps = append(portMaps, p)
+		}
+
+		spec := ContainerSpec{
+			ID:             id,
+			Image:          meta.Image,
+			ImageConfig:    cfg,
+			ManifestLayers: m.Layers,
+			BlobPaths:      paths,
+			Env:            meta.Env,
+			Args:           meta.Args,
+			Hostname:       meta.Hostname,
+			RestartPolicy:  restartPolicyFromString(meta.Restart),
+			ReadOnly:       false,
+			PortMappings:   portMaps,
+		}
+
+		ip := strings.TrimSpace(meta.IP)
+		entry := &containerEntry{
+			spec:      spec,
+			netNS:     nsPath,
+			ip:        ip,
+			bundleDir: bundleDir,
+			rootFS:    merged,
+		}
+
+		s.mu.Lock()
+		if _, exists := s.containers[id]; exists {
+			s.mu.Unlock()
+			continue
+		}
+		s.containers[id] = entry
+		s.mu.Unlock()
+
+		s.log.Info("re-adopted container from crun+bundle meta", "id", id, "image", meta.Image, "ip", ip)
+		if err := s.persistContainerEntry(entry); err != nil {
+			s.log.Warn("crun orphan reconcile: persist", "id", id, "err", err)
+		}
+		s.wg.Add(1)
 		go s.supervise(context.Background(), entry)
 	}
 }

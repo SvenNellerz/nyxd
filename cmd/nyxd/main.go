@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/zrougamed/nyxd/internal/control"
+	"github.com/zrougamed/nyxd/internal/daemonlock"
 	"github.com/zrougamed/nyxd/internal/image"
 	"github.com/zrougamed/nyxd/internal/logs"
 	"github.com/zrougamed/nyxd/internal/network"
@@ -70,6 +71,12 @@ func main() {
 }
 
 func run(ctx context.Context, cfg Config, logger *slog.Logger) error {
+	dlock, err := daemonlock.Acquire(cfg.BaseDir)
+	if err != nil {
+		return err
+	}
+	defer dlock.Close()
+
 	imgStore, err := image.NewStore(cfg.BaseDir + "/images")
 	if err != nil {
 		return fmt.Errorf("image store: %w", err)
@@ -106,7 +113,7 @@ func run(ctx context.Context, cfg Config, logger *slog.Logger) error {
 		return fmt.Errorf("log collector: %w", err)
 	}
 
-	sup := supervisor.New(rt, ovl, net, cfg.BaseDir, logger, logColl)
+	sup := supervisor.New(rt, ovl, net, cfg.BaseDir, logger, logColl, imgStore)
 
 	ctl := control.New(logger, rt, imgStore, sup, ctx, nil, version, gitCommit, buildDate, cfg.BaseDir, cfg.Socket)
 	if err := ctl.Start(); err != nil {

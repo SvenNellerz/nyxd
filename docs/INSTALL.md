@@ -58,6 +58,8 @@ The unit in this repo uses **`Type=notify`** but the daemon does not call `sd_no
 
 Default **`--base-dir=/var/lib/nyxd`**. Ensure the filesystem is persistent (SD card or USB disk), not a tiny tmpfs-only root.
 
+Only **one nyxd** may use a given base-dir at a time: the daemon takes an exclusive non-blocking flock on **`{base-dir}/run/nyxd-daemon.lock`**. A second start exits with an error instead of corrupting state.
+
 ## Next steps
 
 - **[USAGE.md](USAGE.md)** — `nyx` commands and `curl` examples  

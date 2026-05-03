@@ -79,7 +79,7 @@ Both satisfy `network.Backend` (see compile-time assertions in `native/manager.g
 
 ### Supervisor
 
-`internal/supervisor` holds a `network.Backend`, not a concrete `*network.Manager`. `supervisor.New(rt, ovl, net, baseDir, log)` accepts whichever backend `cmd/nyxd` constructed.
+`internal/supervisor` holds a `network.Backend`, not a concrete `*network.Manager`. `supervisor.New(rt, ovl, net, baseDir, log, logColl, imgStore)` accepts whichever backend `cmd/nyxd` constructed (and an optional image store for post-restart re-adoption).
 
 ### `network.PortMapping`
 

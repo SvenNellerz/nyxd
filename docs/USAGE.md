@@ -11,11 +11,14 @@ nyx version
 # Pull (progress UI on stderr; add --json for a single JSON blob on stdout)
 sudo nyx pull nginx:alpine
 
-# Run — foreground streams container logs; Ctrl+C sends SIGKILL (POST /v1/containers/{id}/kill)
+# Run — foreground prints container id, then streams logs; Ctrl+C sends SIGKILL (POST /v1/containers/{id}/kill)
 sudo nyx run nginx:alpine
 
-# Detach immediately after start (fire-and-forget)
+# Detach: prints container id only (use --json for the full JSON object on stdout)
 sudo nyx run -d nginx:alpine
+sudo nyx run -d --json nginx:alpine
+
+# If the image is not in the local store, nyxd pulls it automatically before starting.
 
 # Named container
 sudo nyx run --name web nginx:alpine
@@ -40,7 +43,7 @@ sudo nyx image rm nginx:alpine
 sudo nyx image prune              # remove image metadata not referenced by any running container
 sudo nyx image prune --dry-run      # list what would be removed
 
-# Daemon restart: after a clean shutdown, supervised containers are stopped and JSON under `supervisor/containers/` is removed. After an unclean stop (e.g. nyxd SIGKILL) while crun still runs a workload, those JSON files re-seed `nyx ps` on the next start. Very old runs may lack JSON until recreated once on a current build.
+# Daemon restart: clean shutdown stops workloads and removes supervisor JSON. After an unclean stop while crun still runs a workload, nyxd re-adopts from `supervisor/containers/*.json`, or from `bundles/<id>/nyxd-meta.json` if that JSON is missing (image must still resolve locally).
 
 # Stop from another shell
 sudo nyx stop web
