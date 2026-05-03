@@ -95,6 +95,8 @@ make scan-grype
 
 **[docs/qemu-alpine.md](docs/qemu-alpine.md)** and **`scripts/qemu-alpine-nyxd.sh`** — boot **Alpine 3.23** virt media under QEMU to try nyxd safely before bare metal (e.g. an SBC SD card).
 
+**[benchmarks/README.md](benchmarks/README.md)** — methodology and tables for comparing **nyxd** vs **Docker** vs **Podman** on three matching Alpine 3.23 QEMU guests under the same workload.
+
 ## Security posture
 
 - `NoNewPrivileges=true` in every container spec
