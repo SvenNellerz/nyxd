@@ -59,8 +59,8 @@ clean:
 	rm -rf bin/
 
 install: build build-nyx
-	install -m 755 bin/$(BINARY) $(BINDIR)/$(BINARY)
-	install -m 755 bin/$(NYX) $(BINDIR)/$(NYX)
+	sudo install -m 755 bin/$(BINARY) $(BINDIR)/$(BINARY)
+	sudo install -m 755 bin/$(NYX) $(BINDIR)/$(NYX)
 
 # Same as install with BINDIR=/usr/bin (system-wide PATH)
 install-usr:
