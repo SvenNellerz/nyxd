@@ -67,7 +67,7 @@ func (s *Server) handleContainerLogs(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "missing container id", http.StatusBadRequest)
 		return
 	}
-	canon, err := s.resolveContainerID(id)
+	canon, err := s.resolveContainerIDForLogs(id)
 	if err != nil {
 		writeResolveError(w, err)
 		return
