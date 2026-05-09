@@ -113,39 +113,61 @@ func (s *Server) handleContainerLogs(w http.ResponseWriter, r *http.Request) {
 	tick := time.NewTicker(200 * time.Millisecond)
 	defer tick.Stop()
 
+	// End follow when the container is no longer supervised and the log file has been
+	// fully read for several ticks (foreground clients wait for this to exit like Docker).
+	idle := 0
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-tick.C:
+			inSup := s.containerInSupervisor(id)
 			st, err := os.Stat(logPath)
 			if err != nil {
+				if !inSup {
+					idle++
+					if idle >= 5 {
+						return
+					}
+				} else {
+					idle = 0
+				}
 				continue
 			}
 			if st.Size() < offset {
 				offset = 0
 			}
-			if st.Size() <= offset {
-				continue
-			}
-			f, err := os.Open(logPath)
-			if err != nil {
-				continue
-			}
-			if _, err := f.Seek(offset, io.SeekStart); err != nil {
-				f.Close()
-				continue
-			}
-			sc := bufio.NewScanner(f)
-			for sc.Scan() {
-				b := sc.Bytes()
-				writeLogLine(w, append([]byte(nil), b...), plain)
-				offset += int64(len(b)) + 1
-				if canFlush {
-					fl.Flush()
+			if st.Size() > offset {
+				f, err := os.Open(logPath)
+				if err != nil {
+					idle = 0
+					continue
 				}
+				if _, err := f.Seek(offset, io.SeekStart); err != nil {
+					f.Close()
+					idle = 0
+					continue
+				}
+				sc := bufio.NewScanner(f)
+				for sc.Scan() {
+					b := sc.Bytes()
+					writeLogLine(w, append([]byte(nil), b...), plain)
+					offset += int64(len(b)) + 1
+					if canFlush {
+						fl.Flush()
+					}
+				}
+				f.Close()
+				idle = 0
 			}
-			f.Close()
+			if !inSup && st.Size() <= offset {
+				idle++
+				if idle >= 5 {
+					return
+				}
+			} else {
+				idle = 0
+			}
 		}
 	}
 }

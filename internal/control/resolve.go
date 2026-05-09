@@ -85,6 +85,19 @@ func (s *Server) resolveContainerIDForLogs(raw string) (string, error) {
 	return "", err
 }
 
+// containerInSupervisor reports whether id is currently tracked by the supervisor.
+func (s *Server) containerInSupervisor(id string) bool {
+	if s.sup == nil {
+		return false
+	}
+	for _, x := range s.sup.List() {
+		if x == id {
+			return true
+		}
+	}
+	return false
+}
+
 // writeResolveError maps resolveContainerID errors to HTTP responses.
 func writeResolveError(w http.ResponseWriter, err error) {
 	switch {

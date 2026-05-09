@@ -23,7 +23,8 @@ type runOpts struct {
 	env      []string
 	hostname string
 	restart  string
-	publish  []string
+	publish   []string
+	printID   bool // foreground: print container id on stderr (default: off, docker-like)
 }
 
 func parseRunArgs(args []string) (runOpts, error) {
@@ -34,6 +35,13 @@ func parseRunArgs(args []string) (runOpts, error) {
 		switch {
 		case a == "-d" || a == "--detach":
 			o.detach = true
+			i++
+		case a == "--print-id":
+			o.printID = true
+			i++
+		case strings.HasPrefix(a, "--print-id="):
+			v := strings.TrimPrefix(a, "--print-id=")
+			o.printID = v == "1" || strings.EqualFold(v, "true")
 			i++
 		case a == "--json" || a == "-json":
 			o.jsonOut = true

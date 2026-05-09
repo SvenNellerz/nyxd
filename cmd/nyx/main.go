@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -99,8 +100,9 @@ Commands:
   version           GET /v1/version
   pull [--json] <ref>   streamed progress + summary (use --json for raw JSON)
   run [flags] <image> [-- <argv...>]   start container (-d prints id; --json for full JSON)
-      Foreground (no -d): stream container logs; Ctrl+C sends SIGKILL.
+      Foreground (no -d): stream container logs until the workload exits (like docker run).
       Flags:
+        --print-id          print container id on stderr when attaching (default: off)
         -p, --publish HOST:CONTAINER[/tcp|/udp]   (repeatable; e.g. -p 8080:80)
         -e, --env KEY=VAL                       (repeatable)
         --name <id>   -d, --detach   --hostname <h>   --restart <policy>
@@ -229,33 +231,48 @@ func doRun(socket string, args []string) error {
 		return nil
 	}
 
-	// Foreground: show id (human-readable; use --json on the client if you need full JSON).
-	fmt.Println(out.ID)
+	// Foreground: container output on stdout; optional id on stderr (--print-id). Ctrl+C sends SIGKILL.
+	if o.printID {
+		fmt.Fprintf(os.Stderr, "%s\n", out.ID)
+	}
 
 	logCtx, logCancel := context.WithCancel(context.Background())
 	defer logCancel()
+	logDone := make(chan error, 1)
 	go func() {
-		if err := streamContainerLogs(logCtx, socket, out.ID, os.Stdout); err != nil && logCtx.Err() == nil {
-			fmt.Fprintf(os.Stderr, "nyx: log stream: %v\n", err)
+		err := streamContainerLogs(logCtx, socket, out.ID, os.Stdout)
+		if err != nil && errors.Is(err, context.Canceled) {
+			err = nil
 		}
+		logDone <- err
 	}()
-	fmt.Fprintf(os.Stderr, "container %s — streaming logs; Ctrl+C sends SIGKILL\n", out.ID)
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
 	defer signal.Stop(sigCh)
-	<-sigCh
 
-	logCancel()
-	// Server may wait up to ~90s for crun "stopped" then ~45s for force delete.
-	killCtx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
-	defer cancel()
-	if err := doKillWithContext(killCtx, socket, out.ID); err != nil {
-		fmt.Fprintf(os.Stderr, "nyx: kill: %v\n", err)
-		return err
+	select {
+	case <-sigCh:
+		logCancel()
+		killCtx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+		defer cancel()
+		if err := doKillWithContext(killCtx, socket, out.ID); err != nil {
+			if !httpStatusNotFound(err) {
+				fmt.Fprintf(os.Stderr, "nyx: kill: %v\n", err)
+				return err
+			}
+		} else {
+			fmt.Fprintf(os.Stderr, "SIGKILL sent to %s\n", out.ID)
+		}
+		return nil
+	case err := <-logDone:
+		logCancel()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "nyx: log stream: %v\n", err)
+			return err
+		}
+		return nil
 	}
-	fmt.Fprintf(os.Stderr, "SIGKILL sent to %s\n", out.ID)
-	return nil
 }
 
 func doStop(socket, id string) error {
@@ -281,6 +298,15 @@ func doKillWithContext(ctx context.Context, socket, id string) error {
 		return fmt.Errorf("%s: %s", resp.Status, bytes.TrimSpace(body))
 	}
 	return nil
+}
+
+// httpStatusNotFound reports whether err is an HTTP 404 from the control API.
+func httpStatusNotFound(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "404") && strings.Contains(strings.ToLower(msg), "not found")
 }
 
 func doStopWithContext(ctx context.Context, socket, id string) error {
