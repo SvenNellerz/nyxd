@@ -122,11 +122,21 @@ func (s *Supervisor) Start(ctx context.Context, spec ContainerSpec) error {
 	s.containers[spec.ID] = entry
 	s.mu.Unlock()
 
-	if err := s.startOnce(ctx, entry); err != nil {
+	fastExit, err := s.startOnce(ctx, entry)
+	if err != nil {
 		s.mu.Lock()
 		delete(s.containers, spec.ID)
 		s.mu.Unlock()
 		return err
+	}
+	if fastExit {
+		// Init exited with status 0 before we observed OCI "running" (e.g. default /bin/sh
+		// with no stdin, or a very fast command). No supervisor loop; cleanup is done.
+		s.mu.Lock()
+		delete(s.containers, spec.ID)
+		s.mu.Unlock()
+		s.removePersistedState(spec.ID)
+		return nil
 	}
 
 	s.wg.Add(1)
@@ -410,14 +420,17 @@ func (s *Supervisor) Shutdown(ctx context.Context) {
 // ─── Internal ──────────────────────────────────────────────────────────────────
 
 // startOnce performs a single container start: overlay → network → bundle → crun.
-func (s *Supervisor) startOnce(ctx context.Context, e *containerEntry) error {
+// If the init process exits with code 0 before the supervisor observes OCI status "running",
+// fastExit is true and runtime/network/overlay are already torn down; the caller must not
+// start supervise (Start) or must treat the restart as an immediate exit (supervise).
+func (s *Supervisor) startOnce(ctx context.Context, e *containerEntry) (fastExit bool, err error) {
 	spec := e.spec
 	log := s.log.With("id", spec.ID)
 
 	// 1. Overlay: mount rootfs.
 	rootFS, err := s.ovl.Prepare(spec.ID, spec.BlobPaths, spec.ImageConfig)
 	if err != nil {
-		return fmt.Errorf("overlay prepare: %w", err)
+		return false, fmt.Errorf("overlay prepare: %w", err)
 	}
 	e.rootFS = rootFS
 
@@ -425,7 +438,7 @@ func (s *Supervisor) startOnce(ctx context.Context, e *containerEntry) error {
 	nsPath, err := network.CreateNetNS(spec.ID)
 	if err != nil {
 		s.ovl.Remove(spec.ID) //nolint:errcheck
-		return fmt.Errorf("netns: %w", err)
+		return false, fmt.Errorf("netns: %w", err)
 	}
 	e.netNS = nsPath
 
@@ -433,7 +446,7 @@ func (s *Supervisor) startOnce(ctx context.Context, e *containerEntry) error {
 	if err != nil {
 		network.DeleteNetNS(spec.ID) //nolint:errcheck
 		s.ovl.Remove(spec.ID)        //nolint:errcheck
-		return fmt.Errorf("network setup: %w", err)
+		return false, fmt.Errorf("network setup: %w", err)
 	}
 	e.ip = ip
 	log.Info("network assigned", "ip", ip)
@@ -456,7 +469,7 @@ func (s *Supervisor) startOnce(ctx context.Context, e *containerEntry) error {
 	if err != nil {
 		s.teardownNetwork(ctx, spec.ID)
 		s.ovl.Remove(spec.ID) //nolint:errcheck
-		return fmt.Errorf("bundle: %w", err)
+		return false, fmt.Errorf("bundle: %w", err)
 	}
 	e.bundleDir = bundleDir
 
@@ -488,7 +501,7 @@ func (s *Supervisor) startOnce(ctx context.Context, e *containerEntry) error {
 		logCancel()
 		s.teardownNetwork(ctx, spec.ID)
 		s.ovl.Remove(spec.ID) //nolint:errcheck
-		return fmt.Errorf("stdio pipe: %w", err)
+		return false, fmt.Errorf("stdio pipe: %w", err)
 	}
 	seR, seW, err := os.Pipe()
 	if err != nil {
@@ -497,7 +510,7 @@ func (s *Supervisor) startOnce(ctx context.Context, e *containerEntry) error {
 		logCancel()
 		s.teardownNetwork(ctx, spec.ID)
 		s.ovl.Remove(spec.ID) //nolint:errcheck
-		return fmt.Errorf("stdio pipe: %w", err)
+		return false, fmt.Errorf("stdio pipe: %w", err)
 	}
 
 	if s.logColl != nil {
@@ -539,13 +552,12 @@ func (s *Supervisor) startOnce(ctx context.Context, e *containerEntry) error {
 				logCancel()
 				s.teardownNetwork(ctx, spec.ID)
 				s.ovl.Remove(spec.ID) //nolint:errcheck
-				return fmt.Errorf("crun run: %w", err)
+				return false, fmt.Errorf("crun run: %w", err)
 			}
-			// Foreground crun exited cleanly before we observed "running" (unexpected for a long-running workload).
-			logCancel()
-			s.teardownNetwork(ctx, spec.ID)
-			s.ovl.Remove(spec.ID) //nolint:errcheck
-			return fmt.Errorf("crun run: exited before container reached running state")
+			// Foreground crun returned while we never ticked "running": init exited with 0
+			// (short-lived workload or shell with no stdin). Same teardown as a normal exit.
+			s.finishForegroundFastExit(ctx, e)
+			return true, nil
 		case <-tick.C:
 			st, err2 := s.rt.State(ctx, spec.ID)
 			if err2 == nil && st != nil && st.Status == "running" {
@@ -553,15 +565,24 @@ func (s *Supervisor) startOnce(ctx context.Context, e *containerEntry) error {
 				if err := s.persistContainerEntry(e); err != nil {
 					log.Warn("persist supervisor state", "err", err)
 				}
-				return nil
+				return false, nil
 			}
 		case <-startDeadline.C:
 			logCancel()
 			s.teardownNetwork(ctx, spec.ID)
 			s.ovl.Remove(spec.ID) //nolint:errcheck
-			return fmt.Errorf("crun run: timeout waiting for running state")
+			return false, fmt.Errorf("crun run: timeout waiting for running state")
 		}
 	}
+}
+
+// finishForegroundFastExit tears down after crun's foreground `run` returns with exit
+// status 0 before we observed OCI "running" (race with the status ticker).
+func (s *Supervisor) finishForegroundFastExit(ctx context.Context, e *containerEntry) {
+	s.resetLogIO(e)
+	s.teardownNetwork(ctx, e.spec.ID)
+	s.ovl.Remove(e.spec.ID) //nolint:errcheck
+	s.rt.Delete(ctx, e.spec.ID, false) //nolint:errcheck
 }
 
 // supervise watches a container and applies restart policy.
@@ -622,10 +643,46 @@ func (s *Supervisor) supervise(ctx context.Context, e *containerEntry) {
 		case <-time.After(delay):
 		}
 
-		if err := s.startOnce(ctx, e); err != nil {
-			log.Error("restart failed", "err", err)
-			// Let the loop continue - next iteration will try again or give up.
-			time.Sleep(5 * time.Second)
+	outer:
+		for {
+			fastExit, err := s.startOnce(ctx, e)
+			if err != nil {
+				log.Error("restart failed", "err", err)
+				time.Sleep(5 * time.Second)
+				continue outer
+			}
+			if !fastExit {
+				continue outer
+			}
+			// Init exited with 0 before "running" again; cleanup already done in startOnce.
+			exitCode := 0
+			e.mu.Lock()
+			intentionallyStopped := e.stopped
+			e.mu.Unlock()
+			log.Info("container exited", "exitCode", exitCode, "intentional", intentionallyStopped)
+			if intentionallyStopped {
+				s.mu.Lock()
+				delete(s.containers, e.spec.ID)
+				s.mu.Unlock()
+				s.removePersistedState(e.spec.ID)
+				return
+			}
+			if !s.shouldRestart(e, exitCode) {
+				log.Info("not restarting", "policy", e.spec.RestartPolicy, "restarts", e.restarts)
+				s.mu.Lock()
+				delete(s.containers, e.spec.ID)
+				s.mu.Unlock()
+				s.removePersistedState(e.spec.ID)
+				return
+			}
+			e.restarts++
+			delay := backoff(e.restarts)
+			log.Info("restarting", "attempt", e.restarts, "delay", delay)
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(delay):
+			}
 		}
 	}
 }

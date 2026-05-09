@@ -11,7 +11,9 @@ LDFLAGS  := -w -s \
 	-X main.gitCommit=$(COMMIT) \
 	-X main.buildDate=$(DATE)
 
-.PHONY: all build build-nyx lint vet clean install scan scan-trivy scan-grype
+.PHONY: all build build-nyx lint vet clean install install-usr scan scan-trivy scan-grype
+
+BINDIR ?= /usr/local/bin
 
 all: build build-nyx
 
@@ -57,8 +59,12 @@ clean:
 	rm -rf bin/
 
 install: build build-nyx
-	install -m 755 bin/$(BINARY) /usr/local/bin/$(BINARY)
-	install -m 755 bin/$(NYX) /usr/local/bin/$(NYX)
+	install -m 755 bin/$(BINARY) $(BINDIR)/$(BINARY)
+	install -m 755 bin/$(NYX) $(BINDIR)/$(NYX)
+
+# Same as install with BINDIR=/usr/bin (system-wide PATH)
+install-usr:
+	$(MAKE) install BINDIR=/usr/bin
 
 # Install crun from distro or build from source
 install-crun:

@@ -14,7 +14,9 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/user"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -46,7 +48,8 @@ type Server struct {
 	version   string
 	gitCommit string
 	buildDate string
-	socket    string
+	socket      string
+	socketGroup string // optional: chgrp socket for non-root nyx clients (0660)
 
 	srv    *http.Server
 	ln     net.Listener
@@ -57,7 +60,9 @@ type Server struct {
 // baseCtx should be the daemon lifetime context (e.g. signal-notify ctx) for supervisor.Start.
 // lister is used for GET /v1/containers; if nil but sup non-nil, sup is used as Lister.
 // dataDir is the daemon base directory (logs live under dataDir/logs).
-func New(log *slog.Logger, rt *runtime.Runtime, store *image.Store, sup *supervisor.Supervisor, baseCtx context.Context, lister Lister, version, commit, date, dataDir, socket string) *Server {
+// socketGroup is optional (e.g. "nyxd"); when set, the socket is chown root:group and mode 0660
+// so members of that POSIX group can connect without sudo.
+func New(log *slog.Logger, rt *runtime.Runtime, store *image.Store, sup *supervisor.Supervisor, baseCtx context.Context, lister Lister, version, commit, date, dataDir, socket, socketGroup string) *Server {
 	l := lister
 	if l == nil && sup != nil {
 		l = sup
@@ -65,7 +70,8 @@ func New(log *slog.Logger, rt *runtime.Runtime, store *image.Store, sup *supervi
 	return &Server{
 		log: log, rt: rt, store: store, lister: l, sup: sup, dataDir: dataDir, baseCtx: baseCtx,
 		version: version, gitCommit: commit, buildDate: date,
-		socket: socket,
+		socket:      socket,
+		socketGroup: strings.TrimSpace(socketGroup),
 	}
 }
 
@@ -87,6 +93,23 @@ func (s *Server) Start() error {
 	if err := os.Chmod(s.socket, 0o660); err != nil {
 		_ = ln.Close()
 		return fmt.Errorf("control socket chmod: %w", err)
+	}
+	if s.socketGroup != "" {
+		grp, err := user.LookupGroup(s.socketGroup)
+		if err != nil {
+			_ = ln.Close()
+			return fmt.Errorf("control socket group %q: %w", s.socketGroup, err)
+		}
+		gid, err := strconv.Atoi(grp.Gid)
+		if err != nil {
+			_ = ln.Close()
+			return fmt.Errorf("control socket group gid: %w", err)
+		}
+		if err := os.Chown(s.socket, 0, gid); err != nil {
+			_ = ln.Close()
+			return fmt.Errorf("control socket chown: %w", err)
+		}
+		s.log.Info("control API socket group", "group", s.socketGroup, "gid", gid)
 	}
 	s.ln = ln
 

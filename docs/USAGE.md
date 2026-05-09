@@ -2,7 +2,7 @@
 
 ## nyx CLI (recommended)
 
-Install **`nyx`** next to **`nyxd`** (`make build-nyx`). It talks to the daemon over the Unix socket (default `/run/nyxd/nyxd.sock`, override with `-socket` or `NYXD_SOCKET`).
+Install **`nyx`** next to **`nyxd`** (`make build-nyx`). It talks to the daemon over the Unix socket (default `/run/nyxd/nyxd.sock`, override with `-socket` or `NYXD_SOCKET`). To use **`nyx` as a normal user** (no `sudo`), run **`nyxd --socket-group=…`** and add your user to that POSIX group — see **[INSTALL.md](INSTALL.md)** (`Use nyx without sudo`, `Install to /usr/bin`).
 
 ```bash
 nyx ping

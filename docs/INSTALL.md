@@ -17,13 +17,59 @@ Typical setups: run **nyxd** on the host and **nyx** locally, or call the Unix-s
 
 Networking defaults to **`-net-driver=native`** (no `/opt/cni/bin`). See [networking.md](networking.md).
 
+## Install to `/usr/bin`
+
+From a repo build:
+
+```bash
+sudo make install-usr
+# equivalent: sudo make install BINDIR=/usr/bin
+```
+
+## Use `nyx` without sudo
+
+**nyxd** must still run as **root**. Only the **`nyx` client** can run as a normal user if it can open the control socket.
+
+1. **Create a POSIX group** (once), e.g. `nyxd`:
+
+   ```bash
+   sudo getent group nyxd >/dev/null || sudo groupadd --system nyxd
+   ```
+
+2. **Add your user** to that group, then **log out and back in** (or `newgrp nyxd`) so `id` lists `nyxd` among your groups:
+
+   ```bash
+   sudo usermod -aG nyxd "$USER"
+   ```
+
+3. Start **nyxd** with **`--socket-group=nyxd`**. The daemon keeps **`/run/nyxd/nyxd.sock`** at mode **`0660`** and **`chown`s it to `root:nyxd`**, so anyone in group `nyxd` can connect.
+
+   ```bash
+   sudo nyxd --base-dir=/var/lib/nyxd --socket-group=nyxd
+   ```
+
+   With **systemd**, append `--socket-group=nyxd` to `ExecStart=` in **`nyxd.service`** (the group must exist before the unit starts).
+
+4. Install **`nyx`** (and **`nyxd`**) to **`PATH`**, e.g. **`/usr/bin`** — the binary stays world-executable `755`; access control is the socket, not the file mode on `nyx`:
+
+   ```bash
+   sudo make install-usr
+   ```
+
+5. As your user: `nyx ping`, `nyx ps`, `nyx run -d …` without `sudo`.
+
+This does **not** grant root on the box—only what the HTTP API allows. The daemon still performs privileged container operations.
+
 ## Build on the target host
 
 ```bash
 git clone https://github.com/zrougamed/nyxd.git
 cd nyxd
 make build build-nyx
-sudo install -m 755 bin/nyxd bin/nyx /usr/local/bin/
+sudo make install              # default: /usr/local/bin
+# or system-wide:
+sudo make install-usr          # nyxd + nyx → /usr/bin
+# or:   sudo make install BINDIR=/usr/bin
 ```
 
 ## Cross-compile (e.g. arm64 from x86_64)

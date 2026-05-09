@@ -40,8 +40,9 @@ type Config struct {
 	CNIConfDir  string
 	NetworkName string
 	LogLevel    string
-	Version     bool
-	Socket      string // Unix socket for HTTP control API; empty disables
+	Version      bool
+	Socket       string // Unix socket for HTTP control API; empty disables
+	SocketGroup  string // optional POSIX group for socket (0660); lets non-root users in that group run nyx
 }
 
 func main() {
@@ -115,7 +116,7 @@ func run(ctx context.Context, cfg Config, logger *slog.Logger) error {
 
 	sup := supervisor.New(rt, ovl, net, cfg.BaseDir, logger, logColl, imgStore)
 
-	ctl := control.New(logger, rt, imgStore, sup, ctx, nil, version, gitCommit, buildDate, cfg.BaseDir, cfg.Socket)
+	ctl := control.New(logger, rt, imgStore, sup, ctx, nil, version, gitCommit, buildDate, cfg.BaseDir, cfg.Socket, cfg.SocketGroup)
 	if err := ctl.Start(); err != nil {
 		logger.Warn("control API not started", "err", err)
 	} else {
@@ -150,6 +151,7 @@ func parseFlags() Config {
 	flag.StringVar(&cfg.NetworkName, "network", "nyx", "CNI network name (only for -net-driver=cni)")
 	flag.StringVar(&cfg.LogLevel, "log-level", "info", "Log level: debug|info|warn|error")
 	flag.StringVar(&cfg.Socket, "socket", "/run/nyxd/nyxd.sock", "Unix socket for HTTP control API (nyx client); set to \"\" to disable")
+	flag.StringVar(&cfg.SocketGroup, "socket-group", "", "POSIX group name for the socket (mode 0660, chown root:group); add users to this group so nyx works without sudo")
 	flag.BoolVar(&cfg.Version, "version", false, "Print version and exit")
 	flag.Parse()
 	return cfg
