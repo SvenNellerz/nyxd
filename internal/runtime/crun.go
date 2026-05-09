@@ -30,11 +30,13 @@ type State struct {
 // Runtime wraps crun/runc CLI.
 type Runtime struct {
 	binary  string // path to crun or runc
-	rootDir string // --root: crun state directory
+	rootDir string // --root: crun state directory (only OCI layout; no extra files here)
+	pidDir  string // --pid-file targets; must not live under rootDir or crun list breaks on *.pid names
 }
 
 // New creates a Runtime using the given binary (e.g. "/usr/bin/crun").
-// stateDir is where crun keeps its state (/run/nyxd/crun).
+// stateDir is where crun keeps its state (e.g. {baseDir}/run/crun). PID files are stored in a
+// sibling directory (e.g. {baseDir}/run/crun-pids) so they are not scanned as container IDs.
 func New(binary, stateDir string) (*Runtime, error) {
 	if _, err := os.Stat(binary); err != nil {
 		// Try PATH lookup.
@@ -47,13 +49,21 @@ func New(binary, stateDir string) (*Runtime, error) {
 	if err := os.MkdirAll(stateDir, 0o700); err != nil {
 		return nil, fmt.Errorf("runtime state dir: %w", err)
 	}
-	return &Runtime{binary: binary, rootDir: stateDir}, nil
+	pidDir := filepath.Join(filepath.Dir(stateDir), filepath.Base(stateDir)+"-pids")
+	if err := os.MkdirAll(pidDir, 0o700); err != nil {
+		return nil, fmt.Errorf("runtime pid dir: %w", err)
+	}
+	return &Runtime{binary: binary, rootDir: stateDir, pidDir: pidDir}, nil
+}
+
+func (r *Runtime) pidFilePath(containerID string) string {
+	return filepath.Join(r.pidDir, containerID+".pid")
 }
 
 // Create creates a container from a bundle without starting its process.
 // Equivalent to: crun create --bundle <dir> <id>
 func (r *Runtime) Create(ctx context.Context, containerID, bundleDir string) error {
-	pidFile := filepath.Join(r.rootDir, containerID+".pid")
+	pidFile := r.pidFilePath(containerID)
 	args := []string{
 		"--root", r.rootDir,
 		"create",
@@ -73,7 +83,7 @@ func (r *Runtime) Start(ctx context.Context, containerID string) error {
 // Run creates and starts a container in one step (detached).
 // Returns when the container's init process has started.
 func (r *Runtime) Run(ctx context.Context, containerID, bundleDir string) error {
-	pidFile := filepath.Join(r.rootDir, containerID+".pid")
+	pidFile := r.pidFilePath(containerID)
 	args := []string{
 		"--root", r.rootDir,
 		"run",
@@ -96,7 +106,7 @@ func (r *Runtime) RunForeground(ctx context.Context, containerID, bundleDir stri
 	if stderr == nil {
 		stderr = io.Discard
 	}
-	pidFile := filepath.Join(r.rootDir, containerID+".pid")
+	pidFile := r.pidFilePath(containerID)
 	cmd := exec.CommandContext(ctx, r.binary,
 		"--root", r.rootDir,
 		"run",
@@ -136,7 +146,7 @@ func (r *Runtime) Delete(ctx context.Context, containerID string, force bool) er
 	}
 	args = append(args, containerID)
 	err := r.run(ctx, args, nil)
-	_ = os.Remove(filepath.Join(r.rootDir, containerID+".pid"))
+	_ = os.Remove(r.pidFilePath(containerID))
 	if err != nil && isCrunAbsent(err) {
 		return nil
 	}
