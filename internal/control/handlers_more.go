@@ -109,12 +109,18 @@ func (s *Server) handleContainerLogs(w http.ResponseWriter, r *http.Request) {
 	}
 
 	offset := int64(len(data))
+	// Fast path: workload already finished before follow began and the log file has not
+	// grown since our ReadFile — close immediately instead of ~1s of idle polling (hyperfine).
+	if st, err := os.Stat(logPath); err == nil && st.Size() == offset && !s.containerInSupervisor(id) {
+		return
+	}
+
 	ctx := r.Context()
-	tick := time.NewTicker(200 * time.Millisecond)
+	tick := time.NewTicker(100 * time.Millisecond)
 	defer tick.Stop()
 
 	// End follow when the container is no longer supervised and the log file has been
-	// fully read for several ticks (foreground clients wait for this to exit like Docker).
+	// fully read for several ticks (covers exit while this request was in flight).
 	idle := 0
 	for {
 		select {
@@ -126,7 +132,7 @@ func (s *Server) handleContainerLogs(w http.ResponseWriter, r *http.Request) {
 			if err != nil {
 				if !inSup {
 					idle++
-					if idle >= 5 {
+					if idle >= 4 {
 						return
 					}
 				} else {
@@ -162,7 +168,7 @@ func (s *Server) handleContainerLogs(w http.ResponseWriter, r *http.Request) {
 			}
 			if !inSup && st.Size() <= offset {
 				idle++
-				if idle >= 5 {
+				if idle >= 4 {
 					return
 				}
 			} else {
