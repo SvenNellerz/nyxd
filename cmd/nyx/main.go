@@ -168,6 +168,25 @@ func doVersion(socket string) error {
 	return err
 }
 
+// formatRunFailure turns HTTP error responses into a single readable line (no redundant "502 Bad Gateway" prefix).
+func formatRunFailure(code int, body string) string {
+	body = strings.TrimSpace(body)
+	body = strings.ReplaceAll(body, "\n", " ")
+	if body == "" {
+		body = "(empty response body)"
+	}
+	switch code {
+	case http.StatusBadGateway:
+		return "could not pull or resolve image — " + body
+	case http.StatusServiceUnavailable:
+		return "daemon unavailable — " + body
+	case http.StatusBadRequest:
+		return body
+	default:
+		return fmt.Sprintf("unexpected HTTP %d — %s", code, body)
+	}
+}
+
 func doRun(socket string, args []string) error {
 	o, err := parseRunArgs(args)
 	if err != nil {
@@ -192,6 +211,9 @@ func doRun(socket string, args []string) error {
 	if len(o.publish) > 0 {
 		body["publish"] = o.publish
 	}
+	if !o.jsonOut {
+		body["stream"] = true
+	}
 	raw, _ := json.Marshal(body)
 
 	c := httpClient(socket)
@@ -205,24 +227,39 @@ func doRun(socket string, args []string) error {
 		return err
 	}
 	defer resp.Body.Close()
-	b, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("run: %s: %s", resp.Status, bytes.TrimSpace(b))
+		b, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("run: %s", formatRunFailure(resp.StatusCode, string(bytes.TrimSpace(b))))
 	}
 
+	ct := strings.ToLower(resp.Header.Get("Content-Type"))
 	var out struct {
 		OK    bool   `json:"ok"`
 		ID    string `json:"id"`
 		Image string `json:"image"`
 	}
-	if err := json.Unmarshal(b, &out); err != nil || !out.OK || out.ID == "" {
-		return fmt.Errorf("run: bad response: %s", bytes.TrimSpace(b))
+	var rawJSON []byte
+	if !o.jsonOut && strings.Contains(ct, "ndjson") {
+		id, img, err := consumeRunPullStream(resp.Body, o.image)
+		if err != nil {
+			return err
+		}
+		out.OK, out.ID, out.Image = true, id, img
+	} else {
+		var err error
+		rawJSON, err = io.ReadAll(resp.Body)
+		if err != nil {
+			return err
+		}
+		if err := json.Unmarshal(rawJSON, &out); err != nil || !out.OK || out.ID == "" {
+			return fmt.Errorf("run: bad response: %s", bytes.TrimSpace(rawJSON))
+		}
 	}
 
 	if o.detach {
 		if o.jsonOut {
-			os.Stdout.Write(b)
-			if len(b) > 0 && b[len(b)-1] != '\n' {
+			os.Stdout.Write(rawJSON)
+			if len(rawJSON) > 0 && rawJSON[len(rawJSON)-1] != '\n' {
 				fmt.Println()
 			}
 		} else {

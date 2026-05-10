@@ -400,13 +400,28 @@ func newIPAM(dir, cidr string) *ipam {
 	if err != nil {
 		panic("ipam cidr: " + err.Error())
 	}
-	base := ipToU32(subnet.IP)
-	// Reserve .0 (network), .1 (gateway), .255 (broadcast).
+	ip4 := subnet.IP.To4()
+	if ip4 == nil {
+		panic("ipam cidr: IPv4 only")
+	}
+	base := ipToU32(ip4)
+	maskIP := net.IP(subnet.Mask).To4()
+	if maskIP == nil {
+		panic("ipam cidr: IPv4 mask only")
+	}
+	mask := binary.BigEndian.Uint32(maskIP)
+	broadcast := base | ^mask
+	// Reserve .0 (network), .1 (gateway), and the subnet broadcast address.
+	first := base + 2
+	last := broadcast - 1
+	if first > last {
+		panic(fmt.Sprintf("ipam cidr: no allocatable hosts in %s", cidr))
+	}
 	return &ipam{
 		dir:    dir,
 		subnet: subnet,
-		first:  base + 2,
-		last:   base + 0xFFFE,
+		first:  first,
+		last:   last,
 	}
 }
 

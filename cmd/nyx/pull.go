@@ -263,6 +263,75 @@ func renderPullStream(r io.Reader, ref string) error {
 	return fmt.Errorf("pull stream: connection closed before completion")
 }
 
+// consumeRunPullStream reads NDJSON from POST /v1/containers/run with stream=true:
+// zero or more pull phases (same as nyx pull), a pull "done" summary when a pull occurred,
+// then a terminal {"phase":"run","container_id":...} line.
+func consumeRunPullStream(r io.Reader, ref string) (string, string, error) {
+	ui := newPullUI()
+	defer ui.Close()
+
+	sc := bufio.NewScanner(r)
+	buf := make([]byte, 0, 64*1024)
+	sc.Buffer(buf, 8<<20)
+
+	for sc.Scan() {
+		line := sc.Bytes()
+		if len(bytes.TrimSpace(line)) == 0 {
+			continue
+		}
+		var ev image.PullEvent
+		if err := json.Unmarshal(line, &ev); err != nil {
+			return "", "", fmt.Errorf("run stream: decode: %w", err)
+		}
+		if ev.Phase == "run" {
+			if ev.ContainerID == "" {
+				return "", "", fmt.Errorf("run stream: missing container_id")
+			}
+			img := strings.TrimSpace(ev.Ref)
+			if img == "" {
+				img = ref
+			}
+			return ev.ContainerID, img, nil
+		}
+		switch ev.Phase {
+		case "begin":
+			ui.headerRef = ev.Ref
+			if ev.Ref != "" {
+				fmt.Fprintf(os.Stderr, "\n→ Pulling %s\n\n", ev.Ref)
+			}
+		case "manifest":
+		case "auth":
+		case "meta":
+			fmt.Fprintf(os.Stderr, "%s\n", ev.Message)
+		case "config":
+			ui.ensureBar(ev.Digest, ev.Size, "config")
+		case "layer":
+			if ev.Cached {
+				fmt.Fprintf(os.Stderr, "  • %s  (already present)\n", shortDigest(ev.Digest))
+				continue
+			}
+			ui.ensureBar(ev.Digest, ev.Size, "layer")
+		case "progress":
+			ui.progress(ev.Digest, ev.Current)
+		case "layer_done":
+			ui.closeDigest(ev.Digest)
+		case "done":
+			printPullSummary(os.Stdout, &ev)
+		case "error":
+			if ev.Message != "" {
+				return "", "", fmt.Errorf("while pulling image: %s", ev.Message)
+			}
+			return "", "", fmt.Errorf("while pulling image: unknown error")
+		default:
+			// ignore unknown phases
+		}
+	}
+	if err := sc.Err(); err != nil {
+		return "", "", fmt.Errorf("run stream: %w", err)
+	}
+	return "", "", fmt.Errorf("run stream: connection closed before run phase")
+}
+
 func shortDigest(d string) string {
 	d = strings.TrimPrefix(d, "sha256:")
 	if len(d) > 12 {

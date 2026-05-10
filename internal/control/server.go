@@ -370,7 +370,8 @@ func (s *Server) handleImagePull(w http.ResponseWriter, r *http.Request) {
 	if !body.Stream {
 		cfg, err := s.store.PullWithProgress(r.Context(), body.Ref, nil)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadGateway)
+			s.log.Warn("pull failed", "ref", body.Ref, "err", err)
+			http.Error(w, image.HumanizePullError(err), http.StatusBadGateway)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -405,7 +406,8 @@ func (s *Server) handleImagePull(w http.ResponseWriter, r *http.Request) {
 
 	cfg, err := s.store.PullWithProgress(r.Context(), body.Ref, emit)
 	if err != nil {
-		_ = enc.Encode(image.PullEvent{Phase: "error", Message: err.Error()})
+		s.log.Warn("pull stream failed", "ref", body.Ref, "err", err)
+		_ = enc.Encode(image.PullEvent{Phase: "error", Message: image.HumanizePullError(err)})
 		if ok {
 			fl.Flush()
 		}
@@ -431,7 +433,11 @@ type runRequest struct {
 	Hostname string   `json:"hostname,omitempty"`
 	Restart  string   `json:"restart,omitempty"`
 	Publish  []string `json:"publish,omitempty"`
-	Ports    []struct {
+	// Stream requests application/x-ndjson: same PullEvent lines as /v1/images/pull when an
+	// image pull is required, then a pull "done" summary when a pull occurred, then a
+	// terminal {"phase":"run",...} line with container_id.
+	Stream bool `json:"stream,omitempty"`
+	Ports  []struct {
 		HostPort        int    `json:"hostPort"`
 		ContainerPort   int    `json:"containerPort"`
 		Protocol        string `json:"protocol,omitempty"`
@@ -457,28 +463,43 @@ func (s *Server) handleContainerRun(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	image := strings.TrimSpace(body.Image)
-	if image == "" {
+	imgRef := strings.TrimSpace(body.Image)
+	if imgRef == "" {
 		http.Error(w, "missing image", http.StatusBadRequest)
 		return
 	}
 	id := strings.TrimSpace(body.ID)
 	if id == "" {
-		id = generateContainerID(image)
+		id = generateContainerID(imgRef)
 	}
 
-	m, cfg, paths, err := s.store.ResolvePulledImage(image)
-	if err != nil {
-		s.log.Info("pulling image for run", "ref", image, "err", err)
-		if _, errP := s.store.PullWithProgress(baseCtx, image, nil); errP != nil {
-			http.Error(w, "pull image: "+errP.Error(), http.StatusBadGateway)
+	stream := body.Stream
+	var streamEnc *json.Encoder
+	var streamFlush http.Flusher
+	streamStarted := false
+	writeStream := func(ev image.PullEvent) {
+		if !stream {
 			return
 		}
-		m, cfg, paths, err = s.store.ResolvePulledImage(image)
-		if err != nil {
-			http.Error(w, "resolve image after pull: "+err.Error(), http.StatusBadGateway)
+		if !streamStarted {
+			w.Header().Set("Content-Type", "application/x-ndjson")
+			w.WriteHeader(http.StatusOK)
+			streamEnc = json.NewEncoder(w)
+			if fl, ok := w.(http.Flusher); ok {
+				streamFlush = fl
+			}
+			streamStarted = true
+		}
+		_ = streamEnc.Encode(ev)
+		if streamFlush != nil {
+			streamFlush.Flush()
+		}
+	}
+	writeStreamErr := func(msg string) {
+		if !stream {
 			return
 		}
+		writeStream(image.PullEvent{Phase: "error", Message: msg})
 	}
 
 	var portMaps []network.PortMapping
@@ -510,9 +531,47 @@ func (s *Server) handleContainerRun(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
+	m, cfg, paths, err := s.store.ResolvePulledImage(imgRef)
+	if err != nil {
+		s.log.Info("pulling image for run", "ref", imgRef, "err", err)
+		var pullCb func(image.PullEvent)
+		if stream {
+			pullCb = func(ev image.PullEvent) { writeStream(ev) }
+		}
+		if _, errP := s.store.PullWithProgress(baseCtx, imgRef, pullCb); errP != nil {
+			s.log.Warn("run: pull failed", "ref", imgRef, "err", errP)
+			msg := image.HumanizePullError(errP)
+			if stream {
+				writeStreamErr(msg)
+				return
+			}
+			http.Error(w, msg, http.StatusBadGateway)
+			return
+		}
+		m, cfg, paths, err = s.store.ResolvePulledImage(imgRef)
+		if err != nil {
+			s.log.Warn("run: resolve after pull failed", "ref", imgRef, "err", err)
+			msg := image.HumanizePullError(err)
+			if stream {
+				writeStreamErr(msg)
+				return
+			}
+			http.Error(w, msg, http.StatusBadGateway)
+			return
+		}
+		if stream {
+			writeStream(image.PullEvent{
+				Phase:  "done",
+				OK:     true,
+				RefOut: imgRef,
+				Config: image.SummaryFromConfig(cfg),
+			})
+		}
+	}
+
 	spec := supervisor.ContainerSpec{
 		ID:             id,
-		Image:          image,
+		Image:          imgRef,
 		ImageConfig:    cfg,
 		ManifestLayers: m.Layers,
 		BlobPaths:      paths,
@@ -524,14 +583,26 @@ func (s *Server) handleContainerRun(w http.ResponseWriter, r *http.Request) {
 		PortMappings:   portMaps,
 	}
 	if err := s.sup.Start(baseCtx, spec); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		s.log.Warn("run: start failed", "id", id, "image", imgRef, "err", err)
+		msg := image.TrimUserMessage(err)
+		if stream {
+			writeStreamErr(msg)
+			return
+		}
+		http.Error(w, msg, http.StatusBadRequest)
 		return
 	}
+
+	if stream {
+		writeStream(image.PullEvent{Phase: "run", OK: true, ContainerID: id, Ref: imgRef})
+		return
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"ok":    true,
 		"id":    id,
-		"image": image,
+		"image": imgRef,
 	})
 }
 

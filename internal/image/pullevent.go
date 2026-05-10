@@ -26,6 +26,9 @@ type PullEvent struct {
 	Config *PullSummary   `json:"config,omitempty"`
 	RefOut string         `json:"ref_out,omitempty"` // normalized ref echoed back
 	Error  string         `json:"error,omitempty"`
+
+	// phase "run" — terminal event for POST /v1/containers/run when stream=true (after any pull).
+	ContainerID string `json:"container_id,omitempty"`
 }
 
 // PullSummary is a small view of the pulled image config for the CLI / NDJSON tail.

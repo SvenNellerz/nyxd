@@ -78,26 +78,20 @@ func TestIPAMConcurrent(t *testing.T) {
 }
 
 func TestIPAMExhaustion(t *testing.T) {
-	dir := t.TempDir()
-	// /30: network=.0 gateway=.1 hosts=.2,.3(last-1) broadcast=.3
-	a := newIPAM(dir, "10.0.0.0/30")
-	// first == base+2 == .2, last == base+0xFFFE but capped by /30
-	// Actually last = base+2 for /30 (only 1 usable host in our scheme)
-	// Use a slightly bigger subnet for the test.
-	a2 := newIPAM(t.TempDir(), "10.0.0.0/29") // .2,.3,.4,.5,.6 usable
+	// /29: .0 network, .1 gateway, .2–.6 hosts, .7 broadcast → 5 allocatable addresses.
+	a := newIPAM(t.TempDir(), "10.0.0.0/29")
 
 	for i := range 5 {
-		_, err := a2.allocate(fmt.Sprintf("c%d", i))
+		_, err := a.allocate(fmt.Sprintf("c%d", i))
 		if err != nil {
 			t.Fatalf("allocation %d failed unexpectedly: %v", i, err)
 		}
 	}
-	_, err := a2.allocate("overflow")
+	_, err := a.allocate("overflow")
 	if err == nil {
 		t.Fatal("expected exhaustion, got nil")
 	}
 	t.Logf("exhaustion (expected): %v", err)
-	_ = a
 }
 
 func TestIPConversion(t *testing.T) {
