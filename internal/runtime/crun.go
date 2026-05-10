@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -308,6 +309,12 @@ func (r *Runtime) exitCodeFromRawState(ctx context.Context, containerID string) 
 
 // Exec runs a one-shot process inside a running container (crun exec).
 // If stdin is non-nil, it is wired to crun's stdin (streaming).
+//
+// When stdin comes from a long-lived HTTP body (nyx exec -i), os/exec would otherwise
+// block forever in Wait: it waits for stdin copy to reach EOF after the child exits.
+// WaitDelay lets the runtime close stdin/stdout pipes shortly after the process exits
+// so one-shot commands like `nyx exec -it cid ls` complete while the client keeps the
+// request body open for interactive use.
 func (r *Runtime) Exec(ctx context.Context, containerID string, argv []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	if len(argv) == 0 {
 		return fmt.Errorf("exec: empty argv")
@@ -316,6 +323,8 @@ func (r *Runtime) Exec(ctx context.Context, containerID string, argv []string, s
 	cmd := exec.CommandContext(ctx, r.binary, args...)
 	if stdin != nil {
 		cmd.Stdin = stdin
+		// See package comment: without this, Cmd.Wait never returns if stdin never EOFs.
+		cmd.WaitDelay = 400 * time.Millisecond
 	}
 	switch {
 	case stdout != nil && stderr != nil:
@@ -332,6 +341,13 @@ func (r *Runtime) Exec(ctx context.Context, containerID string, argv []string, s
 		cmd.Stderr = io.Discard
 	}
 	if err := cmd.Run(); err != nil {
+		// Process exited successfully but stdin (or another pipe) did not drain before
+		// WaitDelay; treat as success (common for streamed stdin over HTTP).
+		if stdin != nil && errors.Is(err, exec.ErrWaitDelay) {
+			if cmd.ProcessState != nil && cmd.ProcessState.Success() {
+				return nil
+			}
+		}
 		return fmt.Errorf("crun exec: %w", err)
 	}
 	return nil

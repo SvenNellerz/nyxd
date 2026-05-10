@@ -115,7 +115,7 @@ Commands:
   image rm <ref> [<ref>...]   remove image metadata (POST /v1/images/remove)
   image prune [--dry-run|-n]   remove pulled images not used by any running container
   container <ls|list|rm|logs>   aliases for ps / rm / logs
-  exec [-i] [-t] [-it] <id> [--] <argv...>   exec in container (-i streams stdin; -t accepted, no PTY yet)
+  exec [-i] [-t] [-it] <id> [--] <argv...>   exec in container (-i streams stdin; -t is accepted but there is still no PTY, so shells are line-based only)
 
 Environment:
   NYXD_SOCKET   default control socket (default %s)
