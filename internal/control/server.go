@@ -38,16 +38,16 @@ type Lister interface {
 
 // Server serves HTTP on a Unix socket (e.g. /run/nyxd/nyxd.sock).
 type Server struct {
-	log       *slog.Logger
-	rt        *runtime.Runtime
-	store     *image.Store
-	lister    Lister
-	sup       *supervisor.Supervisor
-	dataDir   string // e.g. /var/lib/nyxd (for container log files)
-	baseCtx   context.Context
-	version   string
-	gitCommit string
-	buildDate string
+	log         *slog.Logger
+	rt          *runtime.Runtime
+	store       *image.Store
+	lister      Lister
+	sup         *supervisor.Supervisor
+	dataDir     string // e.g. /var/lib/nyxd (for container log files)
+	baseCtx     context.Context
+	version     string
+	gitCommit   string
+	buildDate   string
 	socket      string
 	socketGroup string // optional: chgrp socket for non-root nyx clients (0660)
 
@@ -278,6 +278,16 @@ func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
 	fw := &flushWriter{ResponseWriter: w}
 	if err := s.rt.Exec(r.Context(), id, body.Argv, stdin, fw, fw); err != nil {
 		s.log.Warn("control exec", "id", id, "err", err)
+		// Headers are already 200 — still surface the failure on the exec byte stream so
+		// the client is not left with a silent empty body (common when crun fails or the
+		// binary is missing in the container image, e.g. bash on minimal nginx).
+		_, werr := fmt.Fprintf(fw, "\nnyxd: exec: %v\n", err)
+		if werr != nil {
+			s.log.Warn("control exec error write", "id", id, "err", werr)
+		}
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
 	}
 }
 
@@ -379,12 +389,12 @@ func (s *Server) handleImagePull(w http.ResponseWriter, r *http.Request) {
 			"ok":  true,
 			"ref": body.Ref,
 			"config": map[string]any{
-				"os":             cfg.OS,
-				"architecture":   cfg.Architecture,
-				"entrypoint":     cfg.Config.Entrypoint,
-				"cmd":            cfg.Config.Cmd,
-				"working_dir":    cfg.Config.WorkingDir,
-				"env_len":        len(cfg.Config.Env),
+				"os":           cfg.OS,
+				"architecture": cfg.Architecture,
+				"entrypoint":   cfg.Config.Entrypoint,
+				"cmd":          cfg.Config.Cmd,
+				"working_dir":  cfg.Config.WorkingDir,
+				"env_len":      len(cfg.Config.Env),
 			},
 		})
 		return
@@ -438,9 +448,9 @@ type runRequest struct {
 	// terminal {"phase":"run",...} line with container_id.
 	Stream bool `json:"stream,omitempty"`
 	Ports  []struct {
-		HostPort        int    `json:"hostPort"`
-		ContainerPort   int    `json:"containerPort"`
-		Protocol        string `json:"protocol,omitempty"`
+		HostPort      int    `json:"hostPort"`
+		ContainerPort int    `json:"containerPort"`
+		Protocol      string `json:"protocol,omitempty"`
 	} `json:"ports,omitempty"`
 }
 
@@ -525,9 +535,9 @@ func (s *Server) handleContainerRun(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		portMaps = append(portMaps, network.PortMapping{
-			HostPort:        p.HostPort,
-			ContainerPort:   p.ContainerPort,
-			Protocol:        proto,
+			HostPort:      p.HostPort,
+			ContainerPort: p.ContainerPort,
+			Protocol:      proto,
 		})
 	}
 

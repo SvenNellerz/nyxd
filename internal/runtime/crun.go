@@ -324,7 +324,7 @@ func (r *Runtime) Exec(ctx context.Context, containerID string, argv []string, s
 	if stdin != nil {
 		cmd.Stdin = stdin
 		// See package comment: without this, Cmd.Wait never returns if stdin never EOFs.
-		cmd.WaitDelay = 400 * time.Millisecond
+		cmd.WaitDelay = 800 * time.Millisecond
 	}
 	switch {
 	case stdout != nil && stderr != nil:

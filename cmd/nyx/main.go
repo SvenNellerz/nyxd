@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -365,6 +366,58 @@ func doStopWithContext(ctx context.Context, socket, id string) error {
 	return nil
 }
 
+// execFailureMarker is written by nyxd on the exec response stream after headers
+// when crun exec fails (HTTP 200 was already sent so the client can stream stdout).
+const execFailureMarker = "nyxd: exec:"
+
+// execStdStream copies exec output to the real stdout while retaining a tail of bytes
+// so we can detect [execFailureMarker] after the stream ends.
+type execStdStream struct {
+	W    io.Writer
+	tail []byte
+}
+
+func (s *execStdStream) Write(p []byte) (int, error) {
+	n, err := s.W.Write(p)
+	if err != nil {
+		return n, err
+	}
+	s.tail = append(s.tail, p...)
+	const max = 8192
+	if len(s.tail) > max {
+		s.tail = s.tail[len(s.tail)-max:]
+	}
+	return len(p), nil
+}
+
+func (s *execStdStream) failureFromTail() error {
+	idx := bytes.LastIndex(s.tail, []byte(execFailureMarker))
+	if idx < 0 {
+		return nil
+	}
+	line := bytes.TrimSpace(s.tail[idx:])
+	if nl := bytes.IndexByte(line, '\n'); nl >= 0 {
+		line = line[:nl]
+	}
+	msg := strings.TrimSpace(strings.TrimPrefix(string(line), execFailureMarker))
+	if msg == "" {
+		return fmt.Errorf("exec failed")
+	}
+	return fmt.Errorf("%s", msg)
+}
+
+func execShellStdinHint(argv []string) bool {
+	if len(argv) < 1 {
+		return false
+	}
+	switch filepath.Base(strings.TrimSpace(argv[0])) {
+	case "bash", "sh", "ash", "dash", "ksh", "zsh", "csh", "tcsh":
+		return true
+	default:
+		return false
+	}
+}
+
 func doExec(socket string, args []string) error {
 	opts, err := parseExecArgs(args)
 	if err != nil {
@@ -403,6 +456,10 @@ func doExec(socket string, args []string) error {
 		req.Header.Set("Content-Type", "application/json")
 	}
 
+	if opts.AttachStdin && execShellStdinHint(opts.Argv) {
+		fmt.Fprintf(os.Stderr, "nyx: note: exec has no PTY, so shells show no prompt. Type a command and press Enter; use exit or Ctrl+D to finish.\n")
+	}
+
 	resp, err := c.Do(req)
 	if err != nil {
 		return err
@@ -412,6 +469,10 @@ func doExec(socket string, args []string) error {
 		b, _ := io.ReadAll(resp.Body)
 		return fmt.Errorf("exec: %s: %s", resp.Status, bytes.TrimSpace(b))
 	}
-	_, err = io.Copy(os.Stdout, resp.Body)
-	return err
+	sw := &execStdStream{W: os.Stdout}
+	_, copyErr := io.Copy(sw, resp.Body)
+	if ferr := sw.failureFromTail(); ferr != nil {
+		return ferr
+	}
+	return copyErr
 }
