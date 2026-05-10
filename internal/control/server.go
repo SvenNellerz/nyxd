@@ -128,10 +128,14 @@ func (s *Server) Start() error {
 	mux.HandleFunc("POST /v1/images/remove", s.handleImagesRemove)
 	mux.HandleFunc("POST /v1/images/prune", s.handleImagesPrune)
 
+	// ReadHeaderTimeout caps slow clients parsing headers; ReadTimeout must stay 0 so
+	// POST bodies can stream indefinitely (e.g. nyx exec -i stdin). A positive ReadTimeout
+	// applies to the whole request from readRequest start and cancels r.Context mid-exec.
 	s.srv = &http.Server{
-		Handler:      mux,
-		ReadTimeout:  30 * time.Second,
-		WriteTimeout: 15 * time.Minute,
+		Handler:           mux,
+		ReadHeaderTimeout: 30 * time.Second,
+		ReadTimeout:       0,
+		WriteTimeout:      15 * time.Minute,
 	}
 	go func() {
 		s.log.Info("control API listening", "socket", s.socket)
@@ -276,7 +280,15 @@ func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
 		f.Flush()
 	}
 	fw := &flushWriter{ResponseWriter: w}
-	if err := s.rt.Exec(r.Context(), id, body.Argv, stdin, fw, fw); err != nil {
+	// Do not tie crun to r.Context(): net/http cancels that on assorted connection events
+	// (write errors, etc.) while the handler is still running, which surfaces as
+	// "context canceled" from exec.CommandContext. Stdin is still r.Body, so closing the
+	// client connection stops the byte stream. Use the daemon lifetime ctx for shutdown.
+	execCtx := s.baseCtx
+	if execCtx == nil {
+		execCtx = context.Background()
+	}
+	if err := s.rt.Exec(execCtx, id, body.Argv, stdin, fw, fw); err != nil {
 		s.log.Warn("control exec", "id", id, "err", err)
 		// Headers are already 200 — still surface the failure on the exec byte stream so
 		// the client is not left with a silent empty body (common when crun fails or the
