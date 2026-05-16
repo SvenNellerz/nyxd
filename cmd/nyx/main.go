@@ -100,7 +100,7 @@ Commands:
   ping              GET /v1/ping
   version           GET /v1/version
   pull [--json] <ref>   streamed progress + summary (use --json for raw JSON)
-  run [flags] <image> [-- <argv...>]   start container (-d prints id; --json for full JSON)
+  run [flags] <image> [-- <argv...>]   start container (-d prints id; --json for full JSON; foreground streams pull progress)
       Foreground (no -d): stream container logs until the workload exits (like docker run).
       Flags:
         --print-id          print container id on stderr when attaching (default: off)
@@ -212,7 +212,9 @@ func doRun(socket string, args []string) error {
 	if len(o.publish) > 0 {
 		body["publish"] = o.publish
 	}
-	if !o.jsonOut {
+	// Foreground: stream pull progress (NDJSON). Detach uses a compact JSON response
+	// unless --json (same as pre-stream behavior) to avoid extra encode/parse cost.
+	if !o.jsonOut && !o.detach {
 		body["stream"] = true
 	}
 	raw, _ := json.Marshal(body)

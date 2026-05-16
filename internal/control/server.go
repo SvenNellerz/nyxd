@@ -274,6 +274,17 @@ func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
 	s.execMu.Lock()
 	defer s.execMu.Unlock()
 
+	// HTTP/1.x: by default the server drains the request body before/during response
+	// writes. Exec streams stdin from the remainder of r.Body while writing crun
+	// stdout — without full duplex that races and yields http.ErrBodyReadAfterClose.
+	if ct == mimeExecStreamV1 {
+		rc := http.NewResponseController(w)
+		if err := rc.EnableFullDuplex(); err != nil {
+			http.Error(w, "exec stream: full duplex not supported: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+	}
+
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.WriteHeader(http.StatusOK)
 	if f, ok := w.(http.Flusher); ok {
