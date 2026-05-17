@@ -48,8 +48,8 @@ type Service struct {
 	// Resource limits.
 	Deploy *Deploy `yaml:"deploy"`
 
-	// DependsOn service names. Simple ordering only.
-	DependsOn []string `yaml:"depends_on"`
+	// DependsOn service names (list or Compose long-form map with condition:).
+	DependsOn DependsOn `yaml:"depends_on"`
 
 	// Privileged mode (avoid — sets no-new-privs=false).
 	Privileged bool `yaml:"privileged"`

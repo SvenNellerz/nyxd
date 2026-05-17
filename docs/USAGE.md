@@ -62,6 +62,8 @@ sudo nyx exec <id> -- sh -c 'hostname'
 
 **Project name:** container IDs are `{project}-{service}` (sanitized). Use the same **`--project`** for `up`, `stop`, and `down` if you override the default (defaults to the compose filename stem).
 
+**Depends on:** both `depends_on: [svc]` and the Compose **map** form `depends_on: { svc: { condition: service_healthy } }` are accepted; only service **names** are used for start order (`condition` is ignored — readiness comes from **healthcheck** + sequential start).
+
 **Named volumes:** declare names under the top-level `volumes:` key. Data lives under **`{nyxd --base-dir}/volumes/<project>/<volume>/`**. Removing them is optional: **`nyx compose down -v`** deletes those host dirs only after containers are removed and nothing still references the path.
 
 ```bash

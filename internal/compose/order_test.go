@@ -5,7 +5,7 @@ import "testing"
 func TestReverseOrderedContainerIDs(t *testing.T) {
 	st := &Stack{
 		Services: map[string]Service{
-			"app": {Image: "alpine", DependsOn: []string{"db"}},
+			"app": {Image: "alpine", DependsOn: DependsOn{"db"}},
 			"db":  {Image: "alpine"},
 		},
 	}

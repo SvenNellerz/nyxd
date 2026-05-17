@@ -92,6 +92,28 @@ services:
 	}
 }
 
+func TestParseDependsOnMapForm(t *testing.T) {
+	y := `
+version: "1"
+services:
+  subscriber:
+    image: python:3.12-slim
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+  rabbitmq:
+    image: rabbitmq:3-management
+`
+	stack, err := compose.Parse([]byte(y))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	sub := stack.Services["subscriber"]
+	if len(sub.DependsOn) != 1 || sub.DependsOn[0] != "rabbitmq" {
+		t.Fatalf("depends_on: got %#v", []string(sub.DependsOn))
+	}
+}
+
 func TestTopologicalOrder(t *testing.T) {
 	stack, err := compose.Parse([]byte(`
 version: "1"
