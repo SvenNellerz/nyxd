@@ -205,17 +205,4 @@ Legend: `[x]` shipped in tree (still may need polish), `[ ]` not done, `[~]` par
 
 ---
 
-## Next (suggested order)
-
-Opinionated sequence after the recent **foreground run / kill / logs / prune / IPAM CI** work:
-
-1. **Native nft portmap** — implement **`removePortMappings`** + real rule handles; fix IPAM **`last`** for subnets smaller than `/16` (still open in roadmap).
-2. **Supervisor** — wire **`TopologicalOrder`** for compose-style starts; optional global shutdown budget; integrate **`health.Checker`** + unhealthy → restart policy.
-3. **Runtime** — **`crun events`** / pidfd / inotify instead of poll-only **`WaitForExit`** / **`WaitStopped`**.
-4. **Registry** — private auth, platform selection, **blob GC**, resumable layer pulls.
-5. **Comparability** — fill **[benchmarks/](../benchmarks/README.md)** (Docker vs Podman vs nyxd on matching Alpine 3.23 QEMU guests); publish tables under `benchmarks/results/`.
-6. **CI** — Linux integration tests (crun + native network in runner); optional **`golangci-lint`** job; keep **`trivy-action`** tag current.
-
----
-
 *Last reviewed against repository layout on 2026-05-17. **Update `[x]` / `[~]` / `[ ]` when merging features** — keep this file aligned with shipped behavior (CLI flags, API routes, and daemon defaults).*
