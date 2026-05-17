@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"math/rand/v2"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -59,6 +60,9 @@ type ContainerSpec struct {
 	StopTimeout   time.Duration
 
 	Healthcheck *health.Config
+
+	// ExtraMounts are OCI bind (or other) mounts merged into the bundle after defaults.
+	ExtraMounts []bundle.Mount `json:"extra_mounts,omitempty"`
 }
 
 // containerEntry tracks runtime state for a supervised container.
@@ -363,6 +367,27 @@ func (s *Supervisor) Remove(ctx context.Context, id string) error {
 	return nil
 }
 
+// IsBindSourceInUse reports whether any supervised container has an extra mount whose
+// Source is dir or a path under dir (e.g. a named volume directory still referenced).
+func (s *Supervisor) IsBindSourceInUse(dir string) bool {
+	dir = filepath.Clean(dir)
+	if dir == "" || dir == "." {
+		return false
+	}
+	sep := string(filepath.Separator)
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, e := range s.containers {
+		for _, m := range e.spec.ExtraMounts {
+			src := filepath.Clean(m.Source)
+			if src == dir || strings.HasPrefix(src, dir+sep) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // List returns IDs of all supervised containers.
 func (s *Supervisor) List() []string {
 	s.mu.RLock()
@@ -605,6 +630,7 @@ func (s *Supervisor) startOnce(ctx context.Context, e *containerEntry) (fastExit
 		Resources:   spec.Resources,
 		ReadOnly:    spec.ReadOnly,
 		Hostname:    spec.Hostname,
+		ExtraMounts: spec.ExtraMounts,
 	})
 	if err != nil {
 		s.teardownNetwork(ctx, spec.ID)

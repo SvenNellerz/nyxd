@@ -24,7 +24,7 @@ nyxd
 ├── supervisor/   restart policy + lifecycle management
 ├── health/       exec/http/tcp healthchecks
 ├── log/          container log streaming
-└── compose/      nyx-compose.yaml parser
+└── compose/      Compose subset: parse, env/subst, mounts, stack → supervisor specs
 ```
 
 ## Dependencies (external)

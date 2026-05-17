@@ -124,6 +124,8 @@ type Options struct {
 	Resources   *Resources
 	ReadOnly    bool
 	Hostname    string
+	// ExtraMounts are appended after default runtime mounts (binds, named volumes, etc.).
+	ExtraMounts []Mount
 }
 
 // Generate writes an OCI bundle config.json to bundleDir and returns the dir path.
@@ -202,7 +204,7 @@ func buildSpec(opts Options) Spec {
 				{Type: "RLIMIT_NPROC", Hard: 512, Soft: 512},
 			},
 		},
-		Mounts: defaultMounts(),
+		Mounts: appendMounts(defaultMounts(), opts.ExtraMounts),
 		Linux: &Linux{
 			Namespaces:        namespaces,
 			Resources:         opts.Resources,
@@ -237,6 +239,16 @@ func defaultMounts() []Mount {
 		{Destination: "/sys/fs/cgroup", Type: "cgroup", Source: "cgroup", Options: []string{"nosuid", "noexec", "nodev", "relatime", "ro"}},
 		{Destination: "/run", Type: "tmpfs", Source: "tmpfs", Options: []string{"nosuid", "strictatime", "mode=755", "size=65536k"}},
 	}
+}
+
+func appendMounts(base, extra []Mount) []Mount {
+	if len(extra) == 0 {
+		return base
+	}
+	out := make([]Mount, 0, len(base)+len(extra))
+	out = append(out, base...)
+	out = append(out, extra...)
+	return out
 }
 
 func maskedPaths() []string {

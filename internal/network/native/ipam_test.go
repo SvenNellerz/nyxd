@@ -11,7 +11,7 @@ import (
 
 func TestIPAMAllocateRelease(t *testing.T) {
 	dir := t.TempDir()
-	a := newIPAM(dir, "10.88.0.0/24")
+	a := newIPAM(dir, "10.88.0.0/24", "10.88.0.1")
 
 	ids := []string{"c1", "c2", "c3"}
 	ips := make([]string, len(ids))
@@ -48,7 +48,7 @@ func TestIPAMAllocateRelease(t *testing.T) {
 
 func TestIPAMConcurrent(t *testing.T) {
 	dir := t.TempDir()
-	a := newIPAM(dir, "10.88.0.0/24")
+	a := newIPAM(dir, "10.88.0.0/24", "10.88.0.1")
 
 	const n = 20
 	var wg sync.WaitGroup
@@ -79,7 +79,7 @@ func TestIPAMConcurrent(t *testing.T) {
 
 func TestIPAMExhaustion(t *testing.T) {
 	// /29: .0 network, .1 gateway, .2–.6 hosts, .7 broadcast → 5 allocatable addresses.
-	a := newIPAM(t.TempDir(), "10.0.0.0/29")
+	a := newIPAM(t.TempDir(), "10.0.0.0/29", "10.0.0.1")
 
 	for i := range 5 {
 		_, err := a.allocate(fmt.Sprintf("c%d", i))

@@ -50,6 +50,12 @@ func ParseRef(input string) (ParsedRef, error) {
 	return pr, nil
 }
 
+// RegistryAuth carries optional HTTP Basic credentials for registry pulls.
+type RegistryAuth struct {
+	Username string
+	Password string
+}
+
 // Store manages OCI blobs and image metadata on disk.
 //
 //	<storeRoot>/blobs/sha256/<hex>          – raw compressed blobs
@@ -95,12 +101,13 @@ func (s *Store) pullPlatform() (osName, archName string) {
 // Pull fetches an image from a registry and caches blobs locally.
 // ref format: [registry/]name[:tag|@digest]
 func (s *Store) Pull(ctx context.Context, ref string) (*oci.ImageConfig, error) {
-	return s.PullWithProgress(ctx, ref, nil)
+	return s.PullWithProgress(ctx, ref, nil, nil)
 }
 
 // PullWithProgress runs Pull and invokes on for each PullEvent (e.g. NDJSON streaming).
 // on must be non-blocking or very fast; the caller serializes if needed.
-func (s *Store) PullWithProgress(ctx context.Context, ref string, on func(PullEvent)) (*oci.ImageConfig, error) {
+// auth may be nil for anonymous pulls.
+func (s *Store) PullWithProgress(ctx context.Context, ref string, auth *RegistryAuth, on func(PullEvent)) (*oci.ImageConfig, error) {
 	ctx, cancel := context.WithTimeout(ctx, pullTimeout)
 	defer cancel()
 
@@ -121,6 +128,10 @@ func (s *Store) PullWithProgress(ctx context.Context, ref string, on func(PullEv
 		registry: reg,
 		repo:     repo,
 		hc:       &http.Client{Timeout: 30 * time.Second},
+	}
+	if auth != nil {
+		client.user = auth.Username
+		client.pass = auth.Password
 	}
 	client.wantOS, client.wantArch = s.pullPlatform()
 
@@ -613,12 +624,50 @@ type registryClient struct {
 	registry string
 	repo     string
 	token    string
+	user     string
+	pass     string
 	hc       *http.Client
 	wantOS   string
 	wantArch string
 }
 
+func (c *registryClient) setRegistryAuth(req *http.Request) {
+	if c.token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.token)
+		return
+	}
+	if c.user != "" {
+		req.SetBasicAuth(c.user, c.pass)
+	}
+}
+
 func (c *registryClient) auth(ctx context.Context) error {
+	if c.user != "" {
+		url := fmt.Sprintf("%s?service=registry.docker.io&scope=repository:%s:pull", tokenEndpoint, c.repo)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+		if err != nil {
+			return err
+		}
+		req.SetBasicAuth(c.user, c.pass)
+		resp, err := c.hc.Do(req)
+		if err != nil {
+			return err
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			// Non–Docker-Hub registries may not expose this token endpoint; fall back to Basic only.
+			c.token = ""
+			return nil
+		}
+		var tok struct {
+			Token string `json:"token"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&tok); err != nil {
+			return err
+		}
+		c.token = tok.Token
+		return nil
+	}
 	url := fmt.Sprintf("%s?service=registry.docker.io&scope=repository:%s:pull", tokenEndpoint, c.repo)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
@@ -648,13 +697,13 @@ func (c *registryClient) manifest(ctx context.Context, ref string) (*oci.Manifes
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Authorization", "Bearer "+c.token)
 	req.Header.Set("Accept", strings.Join([]string{
 		oci.MediaTypeImageManifest,
 		oci.MediaTypeImageIndex,
 		oci.MediaTypeDockerManifestV2,
 		oci.MediaTypeDockerManifestList,
 	}, ", "))
+	c.setRegistryAuth(req)
 
 	resp, err := c.hc.Do(req)
 	if err != nil {
@@ -711,7 +760,7 @@ func (c *registryClient) blob(ctx context.Context, digest string, start int64) (
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Authorization", "Bearer "+c.token)
+	c.setRegistryAuth(req)
 	if start > 0 {
 		req.Header.Set("Range", fmt.Sprintf("bytes=%d-", start))
 	}

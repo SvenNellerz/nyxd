@@ -17,6 +17,10 @@ type Service struct {
 	// Image ref: registry/repo:tag or registry/repo@sha256:...
 	Image string `yaml:"image"`
 
+	// Optional registry credentials for pulls of this service's image (after .env substitution).
+	RegistryUsername string `yaml:"registry_username,omitempty"`
+	RegistryPassword string `yaml:"registry_password,omitempty"`
+
 	// Command overrides entrypoint args.
 	Command []string `yaml:"command"`
 

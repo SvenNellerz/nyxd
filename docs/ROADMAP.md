@@ -8,15 +8,15 @@ Legend: `[x]` shipped in tree (still may need polish), `[ ]` not done, `[~]` par
 
 - [x] **OCI runtime shell-out** — `internal/runtime`: `crun` create/start/run (`--detach` helper), **`run` foreground** (`--pid-file` + stdio), kill/delete/state/list, **`CrunContainerAbsent`** (missing `status` / not-found) for wait/teardown, idempotent **`Delete`** when state already gone, state JSON parsing, dedicated `--root` state dir.
 - [x] **Supervisor skeleton** — `internal/supervisor`: `Start` / `Stop` / `Kill` / `Remove` / `Shutdown`, restart policies, overlay + **network.Backend** setup + `bundle.Generate` + **`crun run` foreground** (stdio → log collector) with **`resetLogIO`** + **`waitStoppedOrForceDelete`** on stop/kill (missing OCI state tolerated; **`ListInfo`** can show **`absent`**), supervised restart loop with backoff + jitter. **On-disk JSON** under `{baseDir}/supervisor/containers/*.json` plus **`bundles/<id>/nyxd-meta.json`** re-seed **`nyx ps`** after an unclean restart when crun is still **running** (JSON first, then bundle meta + image resolve; no Bolt/SQLite KV).
-- [x] **Image pull (Docker Hub–style)** — `internal/image`: `Store`, anonymous token auth, manifest (+ index) fetch, concurrent layer download with digest verify, atomic blob writes, `ParseRef`, `LoadImageMeta`, `LoadManifest`.
+- [x] **Image pull (Docker Hub–style)** — `internal/image`: `Store`, anonymous token auth, manifest (+ index) fetch with configurable platform (`Store.SetPlatform`, `nyxd -pull-platform`), concurrent layer download with digest verify, atomic blob writes, resumable layer fetch (`.partial` + HTTP Range), `ParseRef`, `LoadImageMeta`, `LoadManifest`, unreferenced blob prune after `RemoveImage`.
 - [x] **CNI exec path (optional)** — `internal/network`: when **`-net-driver=cni`**, conflist generation, `EnsureNetwork`, `Setup`/`Teardown` via plugin exec, netns under `/run/nyxd/netns`, portable `detachUnmount` for teardown. Default daemon mode uses **native** (no `/opt/cni/bin`).
-- [x] **Bundle / OCI config** — `internal/bundle`: `config.json` generation with default caps, masked paths, `noNewPrivileges`, cgroup resource mapping.
+- [x] **Bundle / OCI config** — `internal/bundle`: `config.json` generation with default caps, masked paths, `noNewPrivileges`, cgroup resource mapping, **optional `ExtraMounts`** merged after default mounts.
 - [x] **Compose subset** — `internal/compose`: real YAML (`gopkg.in/yaml.v3`), image/restart validation, unknown `depends_on` detection, cycle detection, `TopologicalOrder` helper, default `no_new_privileges=true` when unset.
 - [x] **Healthcheck library** — `internal/health`: exec (via `crun exec` + `CommandContext`), HTTP, TCP, retries, `onUnhealthy` callback hook (caller must wire policy).
 - [x] **Logs** — `internal/logs`: JSONL append per container, `Tail` (reads whole file — see gaps).
 - [x] **Telemetry types** — `internal/telemetry`: counters + optional Prometheus-ish HTTP handler (`ServeMetrics`) — **not called from daemon today**.
 - [x] **Daemon entry** — `cmd/nyxd`: wiring for store, overlay, **`network.Backend`** (`-net-driver` **native** default or **cni**), runtime, log collector, supervisor; graceful shutdown context (30s); root check; **Unix socket HTTP control API** (`-socket`, default `/run/nyxd/nyxd.sock`); startup log **`network backend`** / **`driver`**; `go.sum` maintained via `go mod tidy`.
-- [x] **`nyx` CLI client** — `cmd/nyx`: `ping`, `version`, `pull` (streamed progress + summary by default, `--json` for single JSON), `run` (foreground: log follow + **Ctrl+C → `POST …/kill` SIGKILL**; `-d`/`--detach`), `ps`, `rm`, `stop`, `logs` (`-f` / `--tail`), `image ls` / `image rm` / **`image prune`** (`--dry-run`), `exec`, `container` aliases; `make build-nyx` → `bin/nyx`.
+- [x] **`nyx` CLI client** — `cmd/nyx`: `ping`, `version`, `pull` (streamed progress + summary by default, `--json` for single JSON; optional **`--username` / `--password`**), `run` (foreground: log follow + **Ctrl+C → `POST …/kill` SIGKILL**; `-d`/`--detach`), `ps`, `rm`, `stop`, `logs` (`-f` / `--tail`), `image ls` / `image rm` / **`image prune`** (`--dry-run`), `exec`, `container` aliases, **`nyx compose up|stop|down`** (compose file discovery, **`down -v`**); `make build-nyx` → `bin/nyx`.
 - [x] **Unit tests** — compose parser, image ref parsing, native IPAM (Linux build); no end-to-end integration tests.
 - [x] **Docs / packaging** — [docs/README.md](README.md) index, **INSTALL** / **USAGE**, **OpenAPI**, [networking.md](networking.md), kernel requirements, native network internals, QEMU Alpine guide, example service units (`Type=simple` in `packaging/nyxd.service`, `Type=notify` in repo `nyxd.service` without `sd_notify` yet).
 
@@ -39,24 +39,24 @@ Legend: `[x]` shipped in tree (still may need polish), `[ ]` not done, `[~]` par
 
 - [~] **Shutdown fairness** — each parallel `Stop` now wrapped in its own **45s** timeout (`Shutdown` context still shared); a hung `crun kill` no longer blocks others indefinitely, but there is no global “all must finish by T” budget beyond the caller’s `ctx`.
 - [x] **Backoff jitter** — exponential backoff adds small random jitter (`math/rand/v2`) to reduce thundering herds.
-- [ ] **`depends_on` start ordering** — compose validates deps + exposes `TopologicalOrder`, but **supervisor does not** start services in that order (map iteration / separate `Start` calls only).
-- [ ] **Readiness vs “started”** — container considered live after `crun run` succeeds; no wait for init HTTP/TCP or compose `healthcheck` before declaring ready (health `Checker` exists but is not integrated in `supervisor.go`).
-- [ ] **Unhealthy → restart** — no automatic policy wiring from `health.Checker` to `Stop`/`Restart` (callback exists, supervisor never passes it today).
+- [x] **Ordered multi-start** — `supervisor.StartSequential` starts specs in slice order; **`compose.BuildContainerSpecs`** + **`POST /v1/compose/up`** + **`nyx compose up`** wire `TopologicalOrder` end-to-end.
+- [x] **Readiness after `crun run`** — optional `ContainerSpec.Healthcheck`: `health.WaitReady` after the workload is running, before `Start` returns; then a background `health.Checker`.
+- [x] **Unhealthy → restart** — checker `onUnhealthy` calls `KillForRestart` when `shouldRestart(..., exitCode=1)` allows it (`RestartNever` does not respawn on health alone).
 
 **Done / partial**
 
 - [x] **Restart policies** — always / on-failure / unless-stopped / never + `MaxRestarts` gate.
 - [x] **Backoff between restarts** — exponential delay capped at 30s **with jitter** (`math/rand/v2`).
-- [x] **`Healthcheck` on spec** — field on `ContainerSpec` for future wiring.
+- [x] **`Healthcheck` on spec** — `ContainerSpec.Healthcheck` + optional `healthcheck` on `POST /v1/containers/run` JSON; normalized defaults via `health.Normalize`.
 
 ---
 
 ## Image puller
 
-- [ ] **Private / credentialed registries** — only anonymous Docker Hub token flow; no `DOCKER_CONFIG`, no basic auth, no OAuth refresh helper.
-- [ ] **Resume partial downloads** — interrupted layer fetch restarts full blob (temp file removed on failure paths).
-- [ ] **Platform override** — manifest index handling hard-requires `linux/amd64` string in code; no `-platform` / GOARCH-aware selection for arm64 etc.
-- [ ] **Garbage collection** — blobs never reclaimed when images removed; store grows monotonically.
+- [~] **Private / credentialed registries** — `PullWithProgress` accepts `RegistryAuth` (Basic + Bearer token flow); **`POST /v1/images/pull`** / **`POST /v1/containers/run`** / compose per-service `registry_username` / `registry_password`; **`nyx pull -u/--password`**. No `DOCKER_CONFIG` / OAuth refresh yet.
+- [x] **Resume partial downloads** — incomplete layer/config fetch keeps `<blob>.partial` and resumes with `Range` when the registry returns `206`; falls back to full re-download if the server ignores ranges.
+- [x] **Platform override** — index picks `wantOS`/`wantArch` from `Store.SetPlatform` or `runtime.GOOS`/`GOARCH`; `nyxd -pull-platform` sets the store.
+- [x] **Garbage collection (blobs)** — `Store.PruneUnreferencedBlobs` removes `blobs/sha256/*` not referenced by any `images/**/manifest.json`; invoked from `RemoveImage` (therefore also during `PruneImagesNotIn` / image prune).
 - [~] **`fetchBlob` return path** — layer pulls use **`fetchBlobToDisk`** (stream + verify + rename, no full-blob `ReadFile` after write). Small config blobs still use `fetchBlob` which re-reads from disk (acceptable size).
 
 **Done / partial**
@@ -64,14 +64,14 @@ Legend: `[x]` shipped in tree (still may need polish), `[ ]` not done, `[~]` par
 - [x] **Public pull + verify** — digest verify on write, atomic rename, bounded concurrency, 4MiB cap on manifest **response** body read (not full layer in RAM during copy).
 - [x] **`ParseRef` / `LoadImageMeta` / `LoadManifest`** — for tooling and unpack helpers.
 - [x] **`PullWithProgress` + streamed pull API** — `POST /v1/images/pull` with `{"stream":true}` returns **`application/x-ndjson`** (phase events + throttled byte progress); **`nyx pull`** uses it by default with progress UI + human summary; **`--json`** keeps the legacy single JSON body.
-- [x] **Image prune (unused metadata)** — `Store.PruneImagesNotIn`, **`POST /v1/images/prune`** (`dry_run`), **`nyx image prune`**; blobs still not GC’d (see gaps).
+- [x] **Image prune** — `Store.PruneImagesNotIn`, **`POST /v1/images/prune`** (`dry_run`), **`nyx image prune`**; each removed image triggers blob prune for unreferenced digests.
 
 ---
 
 ## Overlay
 
-- [ ] **Safe tree walk** — `processWhiteouts` uses `filepath.Walk` (follows symlinks); harden against malicious layers (manual walk / no symlink follow / max depth).
-- [ ] **Layer deduplication** — same digest extracted once per image path; no cross-image shared extraction cache.
+- [x] **Safe tree walk + dedup cache** — overlay extraction uses `WalkDir`, skips symlink directory targets, whiteout path checks with `filepath.Rel`; per-digest extraction cache under `_cache/<sha256>/` with mutex.
+- [x] **Layer deduplication (cross-image)** — shared `_cache/<digest>` for extracted layers.
 - [~] **`extractTar` via host `tar`** — pragmatic but not all OCI whiteout variants (e.g. `.wh..wh..plnk` hardlink whiteouts) guaranteed; pure-Go or container-aware extractor still TBD.
 
 **Done / partial**
@@ -89,8 +89,8 @@ Legend: `[x]` shipped in tree (still may need polish), `[ ]` not done, `[~]` par
 - [~] **`runNft` / `addPortMappings`** — uses `exec.Command` + `withTimeout` instead of `syscall.Exec` (daemon no longer loses the process). Rule syntax / nft availability may still fail at runtime; errors are logged.
 - [x] **`ensureNftTable`** — initial table load uses `exec.Command("/usr/sbin/nft", "-f", file)` inside `sync.Once` (no `unix.Exec`).
 - [x] **`withTimeout`** — used by `runNft` for each shell-out.
-- [ ] **`portmapState`** — declared; `removePortMappings` is still a stub — teardown does not delete DNAT rules.
-- [ ] **IPAM bounds** — `last = base + 0xFFFE` ignores real prefix length; breaks for subnets smaller than `/16` (allocate outside CIDR).
+- [x] **`portmapState` / DNAT teardown** — nft rules tagged with a per-container comment prefix; **`removePortMappings`** deletes matching rules on teardown.
+- [x] **IPAM bounds** — CIDR + gateway from **`NYXD_CONTAINER_SUBNET`** / **`NYXD_GATEWAY_IP`**; allocator walks the real prefix (non-`/16`-only).
 - [ ] **IPv6** — IPv4-only assumptions throughout bridge + NAT.
 
 **Done / partial**
@@ -104,9 +104,14 @@ Legend: `[x]` shipped in tree (still may need polish), `[ ]` not done, `[~]` par
 ## Compose parser
 
 - [x] **Real YAML parsing** — `compose.Parse([]byte)` with `yaml.v3` (replaces old `parseYAML` stub narrative).
-- [ ] **`depends_on` enforcement at runtime** — validated + `TopologicalOrder` exported; **supervisor / daemon do not consume it yet**.
-- [ ] **Variable substitution** — no `${VAR}` / `.env` file interpolation.
-- [ ] **Volume / bind mount model** — types may mention volumes; no mount wiring through to `bundle.Generate` from compose file today.
+- [x] **`depends_on` at runtime** — **`ParseFile`** (`.env` + `${VAR}` substitution), **`BuildContainerSpecs`**, **`POST /v1/compose/up`**, **`nyx compose up`**; **`POST /v1/compose/stop`** / **`down`** + **`nyx compose stop|down`** (default compose filename discovery: nyx-compose → docker-compose → compose → podman-compose, `.yaml`/`.yml`).
+- [x] **Variable substitution** — `${VAR}`, `$VAR`, `${VAR:-default}`, `$$`; `.env` merged then overridden by process env (compose-spec order).
+- [x] **Volume / bind mount model** — compose `volumes:` lines → **`ContainerSpec.ExtraMounts`** → **`bundle.Options.ExtraMounts`**; named volumes require a top-level **`volumes:`** entry; host dirs under **`{baseDir}/volumes/<project>/<name>/`**. **`compose down -v`** removes those dirs when **`supervisor.IsBindSourceInUse`** reports no remaining mount reference.
+
+**Gaps**
+
+- [ ] **Implicit named volumes** — Compose files that reference `name:/path` without a top-level `volumes:` entry for `name` are not treated as named volumes (bind semantics or parse error instead).
+- [ ] **Standalone volume UX** — no `nyx volume ls` / `volume rm`; named volume lifecycle is **create-on-up** + **optional delete on `compose down -v`** only.
 
 **Done / partial**
 
@@ -116,8 +121,8 @@ Legend: `[x]` shipped in tree (still may need polish), `[ ]` not done, `[~]` par
 
 ## Health checks
 
-- [ ] **Supervisor integration** — `internal/health` not started from `supervisor.startOnce`; no link from unhealthy status to restart/stop.
-- [~] **Exec hang** — `checkExec` uses `exec.CommandContext` with timeout ctx (good baseline); still depends on crun honoring signals/cancellation.
+- [x] **Supervisor integration** — readiness `WaitReady` + `Checker.Start` from `supervisor.Start` / re-adopt path; `KillForRestart` on sustained failure when restart policy allows.
+- [~] **Exec hang** — `checkExec` uses `exec.CommandContext` with timeout ctx; still depends on crun honoring signals/cancellation.
 
 **Done / partial**
 
@@ -152,7 +157,7 @@ Legend: `[x]` shipped in tree (still may need polish), `[ ]` not done, `[~]` par
 
 **Yes:** `nyxd` starts an **HTTP server on a Unix domain socket** by default (`-socket=/run/nyxd/nyxd.sock`, override or set `-socket=""` to disable). The **`nyx`** binary is the thin client (`cmd/nyx`).
 
-- [x] **Socket server** — `internal/control`: `GET /v1/ping`, `GET /v1/version`, `GET /v1/containers`, `POST /v1/images/pull` (optional NDJSON stream), `GET /v1/images`, `POST /v1/images/remove`, **`POST /v1/images/prune`**, `POST /v1/containers/run`, `POST /v1/containers/{id}/stop`, `POST /v1/containers/{id}/kill`, `GET /v1/containers/{id}/logs`, `POST /v1/containers/{id}/remove`, `POST /v1/containers/{id}/exec`.
+- [x] **Socket server** — `internal/control`: `GET /v1/ping`, `GET /v1/version`, `GET /v1/containers`, `POST /v1/images/pull` (optional NDJSON stream), `GET /v1/images`, `POST /v1/images/remove`, **`POST /v1/images/prune`**, `POST /v1/containers/run`, **`POST /v1/compose/up`**, **`POST /v1/compose/stop`**, **`POST /v1/compose/down`**, `POST /v1/containers/{id}/stop`, `POST /v1/containers/{id}/kill`, `GET /v1/containers/{id}/logs`, `POST /v1/containers/{id}/remove`, `POST /v1/containers/{id}/exec`.
 - [x] **`nyx run` + kill/stop** — `POST /v1/containers/run` then foreground CLI follows logs; **Ctrl+C** → **`POST /v1/containers/{id}/kill`** (SIGKILL); **`nyx run -d`** detach; **`nyx stop`** → **`/stop`** (graceful then force inside supervisor). Resolves pulled image (`ResolvePulledImage`), builds `ContainerSpec`, **`supervisor.Start`**. Optional `restart` in JSON.
 - [ ] **Auth / TLS** — socket is world-group writable (`0660`); no peer cred check, no token yet (local trust model only).
 - [ ] **Structured errors** — failed `exec` still begins `200` + stream body in some cases; tighten status codes and cap output size.
@@ -175,7 +180,7 @@ Legend: `[x]` shipped in tree (still may need polish), `[ ]` not done, `[~]` par
 
 ## API, clients & UI
 
-- [x] **OpenAPI spec** — [docs/openapi.yaml](openapi.yaml) documents `GET/POST /v1/*` on the Unix socket (schemas for pull stream, run, stop, kill, logs, images list/remove/**prune**, exec). Regenerate or extend when handlers change; CI/SDK samples still TBD.
+- [x] **OpenAPI spec** — [docs/openapi.yaml](openapi.yaml) documents `GET/POST /v1/*` including **compose** (`/v1/compose/up|stop|down`), pull stream, run, registry fields on pull/run, …
 - [ ] **SDK samples** — small runnable examples (e.g. Go, Python, shell+curl) that call the API for pull, run, status, logs; live under `examples/` or docs and stay in sync with the spec.
 - [ ] **UI** — operator-facing web (or desktop) UI for host/node view, container lifecycle, compose stacks, log tail, and metrics; consumes the same API + optional WebSocket/SSE for streaming.
 
@@ -205,4 +210,4 @@ Legend: `[x]` shipped in tree (still may need polish), `[ ]` not done, `[~]` par
 
 ---
 
-*Last reviewed against repository layout on 2026-05-17. **Update `[x]` / `[~]` / `[ ]` when merging features** — keep this file aligned with shipped behavior (CLI flags, API routes, and daemon defaults).*
+*Last reviewed against repository layout on 2026-05-16. **Update `[x]` / `[~]` / `[ ]` when merging features** — keep this file aligned with shipped behavior (CLI flags, API routes, and daemon defaults).*

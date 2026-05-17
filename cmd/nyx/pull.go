@@ -15,35 +15,53 @@ import (
 	"github.com/zrougamed/nyxd/internal/image"
 )
 
-func parsePullArgs(args []string) (ref string, jsonOut bool, err error) {
-	for _, a := range args {
+func parsePullArgs(args []string) (ref string, jsonOut bool, username, password string, err error) {
+	for i := 0; i < len(args); i++ {
+		a := args[i]
 		switch a {
 		case "--json":
 			jsonOut = true
+		case "--username", "-u":
+			if i+1 >= len(args) {
+				return "", false, "", "", fmt.Errorf("usage: nyx pull [--json] [--username USER] [--password PASS] <ref>")
+			}
+			i++
+			username = args[i]
+		case "--password":
+			if i+1 >= len(args) {
+				return "", false, "", "", fmt.Errorf("usage: nyx pull [--json] [--username USER] [--password PASS] <ref>")
+			}
+			i++
+			password = args[i]
 		case "-h", "--help":
-			return "", false, fmt.Errorf("usage: nyx pull [--json] <ref>")
+			return "", false, "", "", fmt.Errorf("usage: nyx pull [--json] [--username USER] [--password PASS] <ref>")
 		default:
 			if strings.HasPrefix(a, "-") {
-				return "", false, fmt.Errorf("unknown flag %q", a)
+				return "", false, "", "", fmt.Errorf("unknown flag %q", a)
 			}
 			if ref != "" {
-				return "", false, fmt.Errorf("unexpected extra argument %q", a)
+				return "", false, "", "", fmt.Errorf("unexpected extra argument %q", a)
 			}
 			ref = a
 		}
 	}
 	if ref == "" {
-		return "", false, fmt.Errorf("usage: nyx pull [--json] <ref>")
+		return "", false, "", "", fmt.Errorf("usage: nyx pull [--json] [--username USER] [--password PASS] <ref>")
 	}
-	return ref, jsonOut, nil
+	return ref, jsonOut, username, password, nil
 }
 
-func doPull(socket, ref string, jsonOut bool) error {
+func doPull(socket, ref string, jsonOut bool, username, password string) error {
 	c := httpClient(socket)
-	body, err := json.Marshal(map[string]any{
+	bodyMap := map[string]any{
 		"ref":    ref,
 		"stream": !jsonOut,
-	})
+	}
+	if strings.TrimSpace(username) != "" {
+		bodyMap["username"] = username
+		bodyMap["password"] = password
+	}
+	body, err := json.Marshal(bodyMap)
 	if err != nil {
 		return err
 	}

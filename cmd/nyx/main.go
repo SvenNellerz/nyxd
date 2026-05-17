@@ -64,11 +64,11 @@ func run(args []string) error {
 	case "version":
 		return doVersion(socket)
 	case "pull":
-		ref, jsonOut, err := parsePullArgs(args[1:])
+		ref, jsonOut, u, p, err := parsePullArgs(args[1:])
 		if err != nil {
 			return err
 		}
-		return doPull(socket, ref, jsonOut)
+		return doPull(socket, ref, jsonOut, u, p)
 	case "run":
 		return doRun(socket, args[1:])
 	case "ps":
@@ -88,6 +88,8 @@ func run(args []string) error {
 		return doStopMany(socket, args[1:])
 	case "exec":
 		return doExec(socket, args[1:])
+	case "compose":
+		return doCompose(socket, args[1:])
 	default:
 		return fmt.Errorf("unknown command %q", args[0])
 	}
@@ -108,7 +110,7 @@ commands:
       check that nyxd is reachable
   version
       print daemon version / build info
-  pull [--json] <ref>
+  pull [--json] [--username USER] [--password PASS] <ref>
       pull an image into the local store; default shows progress, --json streams raw events
   run [flags] <image> [-- <argv...>]
       start a container. default: stay attached and stream logs until the workload exits.
@@ -140,6 +142,12 @@ commands:
   exec [-i] [-t|-it] <id> [--] <argv...>
       run a command in a running container; -i streams stdin from this terminal.
       -t is accepted but there is no PTY — shells are line-based only.
+
+  compose up|stop|down [-f|--file PATH] [--project NAME] [-v|--volumes]
+      compose up: start stack (default file: first of nyx-compose.yaml, docker-compose.yml,
+      compose.yaml, podman-compose.yml, plus .yaml/.yml variants, in cwd).
+      compose stop: SIGTERM services in reverse dependency order.
+      compose down: remove stack containers; -v deletes declared named volume dirs when unreferenced.
 
 environment:
   NYXD_SOCKET   default control socket path

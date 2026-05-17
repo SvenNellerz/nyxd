@@ -18,6 +18,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -25,6 +26,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -35,6 +37,20 @@ import (
 
 	"golang.org/x/sys/unix"
 )
+
+// activeNetConf returns container IPv4 CIDR and gateway from the environment
+// (NYXD_CONTAINER_SUBNET, NYXD_GATEWAY_IP) with defaults matching historical nyxd behavior.
+func activeNetConf() (cidr, gateway string) {
+	cidr = strings.TrimSpace(os.Getenv("NYXD_CONTAINER_SUBNET"))
+	if cidr == "" {
+		cidr = ContainerSubnet
+	}
+	gateway = strings.TrimSpace(os.Getenv("NYXD_GATEWAY_IP"))
+	if gateway == "" {
+		gateway = GatewayIP
+	}
+	return cidr, gateway
+}
 
 // tryEnableRouteLocalnet allows IPv4 DNAT from 127.0.0.1 to a bridge-routed
 // container IP (nft output/prerouting) to be forwarded; without it, published
@@ -82,6 +98,7 @@ func Setup(ctx context.Context, containerID, netNSPath string, ports []network.P
 	}
 
 	// 2. IPAM
+	_, gw := activeNetConf()
 	ip, err := getIPAM().allocate(containerID)
 	if err != nil {
 		return "", fmt.Errorf("ipam: %w", err)
@@ -105,7 +122,7 @@ func Setup(ctx context.Context, containerID, netNSPath string, ports []network.P
 		return "", fmt.Errorf("attach bridge: %w", err)
 	}
 
-	if err := moveVethToNetNS(peerVeth, netNSPath, ip, GatewayIP, log); err != nil {
+	if err := moveVethToNetNS(peerVeth, netNSPath, ip, gw, log); err != nil {
 		deleteLink(hostVeth) //nolint:errcheck
 		getIPAM().release(containerID)
 		return "", fmt.Errorf("move veth: %w", err)
@@ -212,10 +229,17 @@ func createBridge(log *slog.Logger) error {
 	return linkSetUp(fd, BridgeName)
 }
 
-// ensureBridgeIP assigns GatewayIP/16 to nyxbr0 if not already set.
+// ensureBridgeIP assigns the gateway address to nyxbr0 if not already set.
 func ensureBridgeIP(fd int) error {
-	_, subnet, _ := net.ParseCIDR(ContainerSubnet)
-	gwIP := net.ParseIP(GatewayIP).To4()
+	cidr, gwStr := activeNetConf()
+	_, subnet, err := net.ParseCIDR(cidr)
+	if err != nil {
+		return fmt.Errorf("bridge subnet: %w", err)
+	}
+	gwIP := net.ParseIP(gwStr).To4()
+	if gwIP == nil {
+		return fmt.Errorf("bridge gateway: invalid IPv4 %q", gwStr)
+	}
 	return addAddr(fd, BridgeName, gwIP, subnet)
 }
 
@@ -314,7 +338,7 @@ func moveVethToNetNS(peerVeth, netNSPath, containerIP, gateway string, log *slog
 	}
 
 	// Now configure inside the netns.
-	return inNetNS(netNSPath, func() error {
+		return inNetNS(netNSPath, func() error {
 		fd2, err := unixSocket()
 		if err != nil {
 			return err
@@ -322,7 +346,11 @@ func moveVethToNetNS(peerVeth, netNSPath, containerIP, gateway string, log *slog
 		defer unix.Close(fd2)
 
 		ip := net.ParseIP(containerIP).To4()
-		_, subnet, _ := net.ParseCIDR(ContainerSubnet)
+		cidr, _ := activeNetConf()
+		_, subnet, err := net.ParseCIDR(cidr)
+		if err != nil {
+			return fmt.Errorf("container subnet: %w", err)
+		}
 
 		if err := addAddr(fd2, "eth0", ip, subnet); err != nil {
 			return fmt.Errorf("add addr to eth0: %w", err)
@@ -376,7 +404,8 @@ func getIPAM() *ipam {
 				panic("ipam dir: cannot create " + dir + ": " + err.Error())
 			}
 		}
-		ipamInst = newIPAM(dir, ContainerSubnet)
+		cidr, gw := activeNetConf()
+		ipamInst = newIPAM(dir, cidr, gw)
 	})
 	return ipamInst
 }
@@ -388,11 +417,12 @@ type ipam struct {
 	dir    string
 	mu     sync.Mutex
 	subnet *net.IPNet
-	// first allocatable host (gateway+1), last allocatable
-	first, last uint32
+	gwU    uint32 // gateway host address (excluded from allocation)
+	baseU  uint32 // network address as uint32
+	bcU    uint32 // broadcast as uint32
 }
 
-func newIPAM(dir, cidr string) *ipam {
+func newIPAM(dir, cidr, gwStr string) *ipam {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		panic("ipam dir: " + err.Error())
 	}
@@ -404,6 +434,11 @@ func newIPAM(dir, cidr string) *ipam {
 	if ip4 == nil {
 		panic("ipam cidr: IPv4 only")
 	}
+	gw := net.ParseIP(strings.TrimSpace(gwStr)).To4()
+	if gw == nil {
+		panic("ipam gateway: invalid IPv4 " + gwStr)
+	}
+	gwU := ipToU32(gw)
 	base := ipToU32(ip4)
 	maskIP := net.IP(subnet.Mask).To4()
 	if maskIP == nil {
@@ -411,17 +446,19 @@ func newIPAM(dir, cidr string) *ipam {
 	}
 	mask := binary.BigEndian.Uint32(maskIP)
 	broadcast := base | ^mask
-	// Reserve .0 (network), .1 (gateway), and the subnet broadcast address.
-	first := base + 2
-	last := broadcast - 1
-	if first > last {
-		panic(fmt.Sprintf("ipam cidr: no allocatable hosts in %s", cidr))
+	if gwU <= base || gwU >= broadcast {
+		panic(fmt.Sprintf("ipam: gateway %s not inside subnet %s", gwStr, cidr))
+	}
+	// Need at least one assignable host besides gateway.
+	if broadcast <= base+1 {
+		panic(fmt.Sprintf("ipam cidr: no room in %s", cidr))
 	}
 	return &ipam{
 		dir:    dir,
 		subnet: subnet,
-		first:  first,
-		last:   last,
+		gwU:    gwU,
+		baseU:  base,
+		bcU:    broadcast,
 	}
 }
 
@@ -430,12 +467,15 @@ func (a *ipam) allocate(containerID string) (string, error) {
 	defer a.mu.Unlock()
 
 	used := a.usedSet()
-	for candidate := a.first; candidate <= a.last; candidate++ {
-		if used[candidate] {
+	for cand := a.baseU + 1; cand < a.bcU; cand++ {
+		if cand == a.gwU {
 			continue
 		}
-		ip := u32ToIP(candidate)
-		path := filepath.Join(a.dir, fmt.Sprintf("%08x", candidate))
+		if used[cand] {
+			continue
+		}
+		ip := u32ToIP(cand)
+		path := filepath.Join(a.dir, fmt.Sprintf("%08x", cand))
 		if err := os.WriteFile(path, []byte(containerID), 0o600); err != nil {
 			return "", fmt.Errorf("ipam write: %w", err)
 		}
@@ -480,8 +520,7 @@ func (a *ipam) usedSet() map[uint32]bool {
 
 // ─── Port mappings via nftables ───────────────────────────────────────────────
 
-// portmapState tracks nftables rules per container for cleanup.
-var portmapState sync.Map // containerID → []string (rule handles)
+var portMapNftMu sync.Mutex
 
 // tryEnsureNATOutputChain adds the output NAT hook if missing (older nyxd
 // installs only created prerouting/postrouting).
@@ -509,9 +548,13 @@ func tryEnsureNATOutputChain() error {
 // For simplicity we shell out to nft here — pure netlink nftables is 1000+ lines.
 // The nft binary is tiny (part of nftables package) and has no CVE history.
 func addPortMappings(containerID, containerIP string, ports []network.PortMapping, log *slog.Logger) error {
+	portMapNftMu.Lock()
+	defer portMapNftMu.Unlock()
+
 	if err := tryEnsureNATOutputChain(); err != nil {
 		return err
 	}
+	tag := portmapCommentPrefix(containerID)
 	var errs []error
 	for _, p := range ports {
 		proto := p.Protocol
@@ -519,28 +562,27 @@ func addPortMappings(containerID, containerIP string, ports []network.PortMappin
 			proto = "tcp"
 		}
 
-		// DNAT for traffic arriving from outside the host (PREROUTING) and for
-		// locally originated connections to 127.0.0.1:HostPort (OUTPUT).
-		dnatPre := fmt.Sprintf(
-			"nft add rule ip nyxd-nat prerouting "+
-				"%s dport %d dnat to %s:%d",
-			proto, p.HostPort, containerIP, p.ContainerPort,
-		)
-		dnatOut := fmt.Sprintf(
-			"nft add rule ip nyxd-nat output "+
-				"%s dport %d dnat to %s:%d",
-			proto, p.HostPort, containerIP, p.ContainerPort,
-		)
-		// Hairpin: container→host:HostPort loops back correctly
-		hairpin := fmt.Sprintf(
-			"nft add rule ip nyxd-nat postrouting "+
-				"ip daddr %s %s dport %d masquerade",
-			containerIP, proto, p.ContainerPort,
-		)
+		rules := []struct {
+			chain string
+			rule  string
+		}{
+			{"prerouting", fmt.Sprintf(
+				"nft add rule ip nyxd-nat prerouting %s dport %d dnat to %s:%d comment %s",
+				proto, p.HostPort, containerIP, p.ContainerPort, strconv.Quote(fmt.Sprintf("%s-p%d-0", tag, p.HostPort)),
+			)},
+			{"output", fmt.Sprintf(
+				"nft add rule ip nyxd-nat output %s dport %d dnat to %s:%d comment %s",
+				proto, p.HostPort, containerIP, p.ContainerPort, strconv.Quote(fmt.Sprintf("%s-p%d-1", tag, p.HostPort)),
+			)},
+			{"postrouting", fmt.Sprintf(
+				"nft add rule ip nyxd-nat postrouting ip daddr %s %s dport %d masquerade comment %s",
+				containerIP, proto, p.ContainerPort, strconv.Quote(fmt.Sprintf("%s-p%d-2", tag, p.HostPort)),
+			)},
+		}
 
-		for _, rule := range []string{dnatPre, dnatOut, hairpin} {
-			if err := runNft(rule); err != nil {
-				log.Warn("nft rule", "rule", rule, "err", err)
+		for _, r := range rules {
+			if err := runNft(r.rule); err != nil {
+				log.Warn("nft rule", "chain", r.chain, "err", err)
 				errs = append(errs, err)
 			}
 		}
@@ -552,10 +594,19 @@ func addPortMappings(containerID, containerIP string, ports []network.PortMappin
 }
 
 func removePortMappings(containerID string, log *slog.Logger) error {
-	// Flush rules by comment/mark matching containerID.
-	// In production: store rule handles from `nft --json` output on add,
-	// then delete by handle. For now flush the per-container chain.
-	_ = containerID
+	portMapNftMu.Lock()
+	defer portMapNftMu.Unlock()
+
+	prefix := portmapCommentPrefix(containerID)
+	var errs []error
+	for _, chain := range []string{"prerouting", "output", "postrouting"} {
+		if err := nftDeleteRulesWithCommentPrefix(chain, prefix); err != nil {
+			errs = append(errs, fmt.Errorf("chain %s: %w", chain, err))
+		}
+	}
+	if len(errs) > 0 {
+		return errors.Join(errs...)
+	}
 	return nil
 }
 

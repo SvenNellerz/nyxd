@@ -11,6 +11,9 @@ nyx version
 # Pull (progress UI on stderr; add --json for a single JSON blob on stdout)
 sudo nyx pull nginx:alpine
 
+# Private registry (optional; same fields as POST /v1/images/pull JSON)
+sudo nyx pull --username "$USER" --password "$TOKEN" registry.example.com/myapp:1.0
+
 # Run — foreground prints container id, then streams logs; Ctrl+C sends SIGKILL (POST /v1/containers/{id}/kill)
 sudo nyx run nginx:alpine
 
@@ -53,6 +56,27 @@ sudo nyx exec <id> sh -c 'hostname'
 sudo nyx exec <id> -- sh -c 'hostname'
 ```
 
+## Compose stacks (`nyx compose`)
+
+**Compose file:** if you omit `-f` / `--file`, **`nyx`** picks the first existing file in the **current directory**, in this order: `nyx-compose.yaml` / `.yml`, then `docker-compose.yaml` / `.yml`, then `compose.yaml` / `.yml`, then `podman-compose.yaml` / `.yml`. The file must be readable on the **daemon host** (paths are sent to `nyxd`).
+
+**Project name:** container IDs are `{project}-{service}` (sanitized). Use the same **`--project`** for `up`, `stop`, and `down` if you override the default (defaults to the compose filename stem).
+
+**Named volumes:** declare names under the top-level `volumes:` key. Data lives under **`{nyxd --base-dir}/volumes/<project>/<volume>/`**. Removing them is optional: **`nyx compose down -v`** deletes those host dirs only after containers are removed and nothing still references the path.
+
+```bash
+cd /path/to/stack   # contains e.g. docker-compose.yml or nyx-compose.yaml
+
+sudo nyx compose up
+sudo nyx compose up -f ./prod-compose.yaml --project myapp
+
+sudo nyx compose stop              # SIGTERM / stop path, reverse dependency order
+sudo nyx compose down            # stop + remove containers
+sudo nyx compose down -v         # also remove declared named volume dirs when safe
+```
+
+See **[openapi.yaml](openapi.yaml)** (`ComposeProjectRequest`, `/v1/compose/up|stop|down`) and **[ROADMAP.md](ROADMAP.md)** (compose gaps: no `nyx volume ls`, implicit anonymous named volumes).
+
 ## Raw HTTP with curl
 
 See **[openapi.yaml](openapi.yaml)** for schemas. Socket example:
@@ -67,6 +91,10 @@ curl -sS --unix-socket "$SOCK" 'http://localhost/v1/containers?detail=1'
 
 curl -sS --unix-socket "$SOCK" -H 'Content-Type: application/json' \
   -d '{"ref":"nginx:alpine","stream":false}' \
+  http://localhost/v1/images/pull
+
+curl -sS --unix-socket "$SOCK" -H 'Content-Type: application/json' \
+  -d '{"ref":"registry.example.com/myapp:1.0","stream":false,"username":"me","password":"secret"}' \
   http://localhost/v1/images/pull
 
 curl -sS --unix-socket "$SOCK" -H 'Content-Type: application/json' \
@@ -100,6 +128,19 @@ curl -sS --unix-socket "$SOCK" -X POST http://localhost/v1/containers/<id>/remov
 curl -sS --unix-socket "$SOCK" -H 'Content-Type: application/json' \
   -d '{"argv":["sh","-c","uname -a"]}' \
   http://localhost/v1/containers/<id>/exec
+
+# Compose (file path must exist on the nyxd host)
+curl -sS --unix-socket "$SOCK" -H 'Content-Type: application/json' \
+  -d "{\"file\":\"/var/lib/stacks/demo/docker-compose.yml\",\"project\":\"demo\"}" \
+  http://localhost/v1/compose/up
+
+curl -sS --unix-socket "$SOCK" -H 'Content-Type: application/json' \
+  -d "{\"file\":\"/var/lib/stacks/demo/docker-compose.yml\",\"project\":\"demo\"}" \
+  http://localhost/v1/compose/stop
+
+curl -sS --unix-socket "$SOCK" -H 'Content-Type: application/json' \
+  -d "{\"file\":\"/var/lib/stacks/demo/docker-compose.yml\",\"project\":\"demo\",\"remove_volumes\":true}" \
+  http://localhost/v1/compose/down
 ```
 
 ## OpenAPI

@@ -16,11 +16,13 @@ import (
 	"os"
 	"os/user"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/zrougamed/nyxd/internal/compose"
 	"github.com/zrougamed/nyxd/internal/health"
 	"github.com/zrougamed/nyxd/internal/image"
 	"github.com/zrougamed/nyxd/internal/network"
@@ -124,6 +126,9 @@ func (s *Server) Start() error {
 	mux.HandleFunc("POST /v1/containers/{id}/kill", s.handleContainerKill)
 	mux.HandleFunc("GET /v1/containers/{id}/logs", s.handleContainerLogs)
 	mux.HandleFunc("POST /v1/containers/run", s.handleContainerRun)
+	mux.HandleFunc("POST /v1/compose/up", s.handleComposeUp)
+	mux.HandleFunc("POST /v1/compose/stop", s.handleComposeStop)
+	mux.HandleFunc("POST /v1/compose/down", s.handleComposeDown)
 	mux.HandleFunc("POST /v1/images/pull", s.handleImagePull)
 	mux.HandleFunc("GET /v1/images", s.handleImagesList)
 	mux.HandleFunc("POST /v1/images/remove", s.handleImagesRemove)
@@ -382,8 +387,10 @@ func (s *Server) handleContainerRemove(w http.ResponseWriter, r *http.Request) {
 }
 
 type pullRequest struct {
-	Ref    string `json:"ref"`
-	Stream bool   `json:"stream,omitempty"`
+	Ref      string `json:"ref"`
+	Stream   bool   `json:"stream,omitempty"`
+	Username string `json:"username,omitempty"`
+	Password string `json:"password,omitempty"`
 }
 
 func (s *Server) handleImagePull(w http.ResponseWriter, r *http.Request) {
@@ -402,7 +409,7 @@ func (s *Server) handleImagePull(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if !body.Stream {
-		cfg, err := s.store.PullWithProgress(r.Context(), body.Ref, nil)
+		cfg, err := s.store.PullWithProgress(r.Context(), body.Ref, pullAuthFromPullBody(&body), nil)
 		if err != nil {
 			s.log.Warn("pull failed", "ref", body.Ref, "err", err)
 			http.Error(w, image.HumanizePullError(err), http.StatusBadGateway)
@@ -438,7 +445,7 @@ func (s *Server) handleImagePull(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	cfg, err := s.store.PullWithProgress(r.Context(), body.Ref, emit)
+	cfg, err := s.store.PullWithProgress(r.Context(), body.Ref, pullAuthFromPullBody(&body), emit)
 	if err != nil {
 		s.log.Warn("pull stream failed", "ref", body.Ref, "err", err)
 		_ = enc.Encode(image.PullEvent{Phase: "error", Message: image.HumanizePullError(err)})
@@ -457,6 +464,198 @@ func (s *Server) handleImagePull(w http.ResponseWriter, r *http.Request) {
 	if ok {
 		fl.Flush()
 	}
+}
+
+type composeProjectRequest struct {
+	File          string `json:"file,omitempty"`
+	Yaml          string `json:"yaml,omitempty"`
+	ContextDir    string `json:"context_dir,omitempty"`
+	Project       string `json:"project,omitempty"`
+	RemoveVolumes bool   `json:"remove_volumes,omitempty"`
+}
+
+// loadComposeProject parses the compose document from body (file path or inline yaml)
+// and returns the stack, compose directory for volume resolution, and project name.
+func (s *Server) loadComposeProject(body composeProjectRequest) (*compose.Stack, string, string, error) {
+	filePath := strings.TrimSpace(body.File)
+	yamlBody := strings.TrimSpace(body.Yaml)
+	if (filePath == "") == (yamlBody == "") {
+		return nil, "", "", fmt.Errorf("exactly one of file or yaml is required")
+	}
+	var (
+		st         *compose.Stack
+		composeDir string
+		err        error
+	)
+	if filePath != "" {
+		abs, errAbs := filepath.Abs(filePath)
+		if errAbs != nil {
+			return nil, "", "", errAbs
+		}
+		st, err = compose.ParseFile(abs)
+		if err != nil {
+			return nil, "", "", err
+		}
+		composeDir = filepath.Dir(abs)
+		if strings.TrimSpace(body.Project) == "" {
+			body.Project = strings.TrimSuffix(filepath.Base(abs), filepath.Ext(abs))
+		}
+	} else {
+		composeDir = strings.TrimSpace(body.ContextDir)
+		if composeDir == "" {
+			return nil, "", "", fmt.Errorf("context_dir is required with yaml body")
+		}
+		ad, errAbs := filepath.Abs(composeDir)
+		if errAbs != nil {
+			return nil, "", "", errAbs
+		}
+		composeDir = ad
+		st, err = compose.ParseInterpolated([]byte(yamlBody), composeDir)
+		if err != nil {
+			return nil, "", "", err
+		}
+		if strings.TrimSpace(body.Project) == "" {
+			body.Project = filepath.Base(composeDir)
+		}
+	}
+	project := strings.TrimSpace(body.Project)
+	if project == "" {
+		project = "compose"
+	}
+	return st, composeDir, project, nil
+}
+
+func (s *Server) handleComposeUp(w http.ResponseWriter, r *http.Request) {
+	if s.sup == nil {
+		http.Error(w, "supervisor not available", http.StatusServiceUnavailable)
+		return
+	}
+	if s.store == nil {
+		http.Error(w, "image store not available", http.StatusServiceUnavailable)
+		return
+	}
+	baseCtx := s.baseCtx
+	if baseCtx == nil {
+		baseCtx = context.Background()
+	}
+	var body composeProjectRequest
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&body); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	st, composeDir, project, err := s.loadComposeProject(body)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	specs, err := compose.BuildContainerSpecs(baseCtx, st, compose.UpMeta{
+		ComposeDir: composeDir,
+		Project:    project,
+		DataDir:    s.dataDir,
+	}, s.store)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := s.sup.StartSequential(baseCtx, specs); err != nil {
+		s.log.Warn("compose up", "err", err)
+		http.Error(w, image.TrimUserMessage(err), http.StatusBadRequest)
+		return
+	}
+	ids := make([]string, len(specs))
+	for i := range specs {
+		ids[i] = specs[i].ID
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "ids": ids})
+}
+
+func (s *Server) handleComposeStop(w http.ResponseWriter, r *http.Request) {
+	if s.sup == nil {
+		http.Error(w, "supervisor not available", http.StatusServiceUnavailable)
+		return
+	}
+	baseCtx := s.baseCtx
+	if baseCtx == nil {
+		baseCtx = context.Background()
+	}
+	var body composeProjectRequest
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&body); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	st, _, project, err := s.loadComposeProject(body)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	ids := compose.ReverseOrderedContainerIDs(st, project)
+	for _, id := range ids {
+		if err := s.sup.Stop(baseCtx, id); err != nil {
+			if !strings.Contains(strings.ToLower(err.Error()), "not found") {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+		}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "stopped": ids})
+}
+
+func (s *Server) handleComposeDown(w http.ResponseWriter, r *http.Request) {
+	if s.sup == nil {
+		http.Error(w, "supervisor not available", http.StatusServiceUnavailable)
+		return
+	}
+	baseCtx := s.baseCtx
+	if baseCtx == nil {
+		baseCtx = context.Background()
+	}
+	var body composeProjectRequest
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&body); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	st, _, project, err := s.loadComposeProject(body)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	ids := compose.ReverseOrderedContainerIDs(st, project)
+	for _, id := range ids {
+		if err := s.sup.Remove(baseCtx, id); err != nil {
+			if !strings.Contains(strings.ToLower(err.Error()), "not found") {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+		}
+	}
+	removedVolDirs := []string(nil)
+	if body.RemoveVolumes && len(st.Volumes) > 0 {
+		names := make([]string, 0, len(st.Volumes))
+		for n := range st.Volumes {
+			names = append(names, n)
+		}
+		sort.Strings(names)
+		for _, volName := range names {
+			p := compose.NamedVolumeHostPath(s.dataDir, project, volName)
+			if s.sup.IsBindSourceInUse(p) {
+				s.log.Warn("compose down: volume path still referenced, skipping delete", "path", p)
+				continue
+			}
+			if err := os.RemoveAll(p); err != nil {
+				s.log.Warn("compose down: remove volume dir", "path", p, "err", err)
+				continue
+			}
+			removedVolDirs = append(removedVolDirs, p)
+		}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	out := map[string]any{"ok": true, "removed": ids}
+	if len(removedVolDirs) > 0 {
+		out["removed_volume_paths"] = removedVolDirs
+	}
+	_ = json.NewEncoder(w).Encode(out)
 }
 
 type runHealthJSON struct {
@@ -489,6 +688,9 @@ type runRequest struct {
 	} `json:"ports,omitempty"`
 	// Healthcheck optional readiness + ongoing checks (exec/http/tcp).
 	Healthcheck *runHealthJSON `json:"healthcheck,omitempty"`
+	// Optional registry credentials when this run triggers an image pull.
+	RegistryUsername string `json:"registry_username,omitempty"`
+	RegistryPassword string `json:"registry_password,omitempty"`
 }
 
 func (s *Server) handleContainerRun(w http.ResponseWriter, r *http.Request) {
@@ -585,7 +787,7 @@ func (s *Server) handleContainerRun(w http.ResponseWriter, r *http.Request) {
 		if stream {
 			pullCb = func(ev image.PullEvent) { writeStream(ev) }
 		}
-		if _, errP := s.store.PullWithProgress(baseCtx, imgRef, pullCb); errP != nil {
+		if _, errP := s.store.PullWithProgress(baseCtx, imgRef, pullAuthFromRunBody(&body), pullCb); errP != nil {
 			s.log.Warn("run: pull failed", "ref", imgRef, "err", errP)
 			msg := image.HumanizePullError(errP)
 			if stream {
@@ -727,6 +929,20 @@ func parseRunHealthcheck(j *runHealthJSON) (*health.Config, error) {
 		return nil, fmt.Errorf("unknown type %q", j.Type)
 	}
 	return cfg, nil
+}
+
+func pullAuthFromPullBody(b *pullRequest) *image.RegistryAuth {
+	if strings.TrimSpace(b.Username) == "" {
+		return nil
+	}
+	return &image.RegistryAuth{Username: strings.TrimSpace(b.Username), Password: b.Password}
+}
+
+func pullAuthFromRunBody(b *runRequest) *image.RegistryAuth {
+	if strings.TrimSpace(b.RegistryUsername) == "" {
+		return nil
+	}
+	return &image.RegistryAuth{Username: strings.TrimSpace(b.RegistryUsername), Password: b.RegistryPassword}
 }
 
 func generateContainerID(image string) string {

@@ -6,10 +6,12 @@ package overlay
 
 import (
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 
 	"github.com/zrougamed/nyxd/pkg/oci"
@@ -26,6 +28,9 @@ import (
 //	  merged/  – merged mount point (container rootfs)
 type Manager struct {
 	base string // e.g. /var/lib/nyxd/overlay
+
+	dlMu        sync.Mutex
+	digestLocks map[string]*sync.Mutex
 }
 
 // NewManager creates an overlay manager rooted at base.
@@ -33,7 +38,7 @@ func NewManager(base string) (*Manager, error) {
 	if err := os.MkdirAll(base, 0o700); err != nil {
 		return nil, fmt.Errorf("overlay manager init: %w", err)
 	}
-	return &Manager{base: base}, nil
+	return &Manager{base: base, digestLocks: make(map[string]*sync.Mutex)}, nil
 }
 
 // Prepare unpacks image layers and mounts an overlayfs for containerID.
@@ -52,15 +57,13 @@ func (m *Manager) Prepare(containerID string, blobPaths []string, cfg *oci.Image
 		}
 	}
 
-	// Extract each layer tarball into its own directory.
+	// Extract each layer tarball into its own directory (shared content-addressed cache).
 	lowerDirs := make([]string, 0, len(blobPaths))
-	for i, blobPath := range blobPaths {
-		ldir := filepath.Join(layersDir, fmt.Sprintf("%04d", i))
-		if err := os.MkdirAll(ldir, 0o755); err != nil {
+	for _, blobPath := range blobPaths {
+		digest := layerDigestFromBlobPath(blobPath)
+		ldir, err := m.layerDirForDigest(digest, blobPath)
+		if err != nil {
 			return "", err
-		}
-		if err := extractTar(blobPath, ldir); err != nil {
-			return "", fmt.Errorf("extract layer %d: %w", i, err)
 		}
 		lowerDirs = append(lowerDirs, ldir)
 	}
@@ -129,28 +132,99 @@ func extractTar(src, dest string) error {
 	return processWhiteouts(dest)
 }
 
+func layerDigestFromBlobPath(blobPath string) string {
+	base := filepath.Base(blobPath)
+	if len(base) == 64 {
+		return "sha256:" + base
+	}
+	return base
+}
+
+func (m *Manager) lockDigest(d string) func() {
+	m.dlMu.Lock()
+	mu, ok := m.digestLocks[d]
+	if !ok {
+		mu = &sync.Mutex{}
+		m.digestLocks[d] = mu
+	}
+	m.dlMu.Unlock()
+	mu.Lock()
+	return mu.Unlock
+}
+
+// layerDirForDigest returns a shared extracted layer directory under base/_cache/<digest>/.
+func (m *Manager) layerDirForDigest(digest, blobPath string) (string, error) {
+	hex := strings.TrimPrefix(digest, "sha256:")
+	if hex == "" || strings.Contains(hex, string(filepath.Separator)) || strings.Contains(hex, "..") {
+		return "", fmt.Errorf("invalid layer digest %q", digest)
+	}
+	cacheRoot := filepath.Join(m.base, "_cache", hex)
+	unlock := m.lockDigest(digest)
+	defer unlock()
+
+	marker := filepath.Join(cacheRoot, ".nyxd-extracted")
+	if st, err := os.Stat(marker); err == nil && st.Mode().IsRegular() {
+		return cacheRoot, nil
+	}
+	if err := os.RemoveAll(cacheRoot); err != nil && !os.IsNotExist(err) {
+		return "", err
+	}
+	if err := os.MkdirAll(cacheRoot, 0o755); err != nil {
+		return "", err
+	}
+	if err := extractTar(blobPath, cacheRoot); err != nil {
+		_ = os.RemoveAll(cacheRoot)
+		return "", fmt.Errorf("extract layer %s: %w", digest, err)
+	}
+	if err := os.WriteFile(marker, []byte("1"), 0o644); err != nil {
+		return "", err
+	}
+	return cacheRoot, nil
+}
+
 // processWhiteouts handles OCI layer whiteout semantics:
 //   - .wh.<name>     → delete <name> in the same directory
 //   - .wh..wh..opq  → opaque directory (nothing to do for overlayfs upperdir,
 //     kernel handles it via trusted.overlay.opaque xattr)
 func processWhiteouts(root string) error {
-	return filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+	root = filepath.Clean(root)
+	return filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
+		}
+		if d.Type()&fs.ModeSymlink != 0 {
+			// Do not follow symlinks when scanning for whiteouts.
+			return nil
+		}
+		if !d.Type().IsRegular() && !d.IsDir() {
+			return nil
 		}
 		base := filepath.Base(path)
 		if !strings.HasPrefix(base, ".wh.") {
 			return nil
 		}
 		if base == ".wh..wh..opq" {
-			// Opaque whiteout - remove the marker, overlayfs handles it via xattr.
 			return os.Remove(path)
 		}
-		// Regular whiteout: remove the marker and the target file.
-		target := filepath.Join(filepath.Dir(path), strings.TrimPrefix(base, ".wh."))
-		os.RemoveAll(target) // best-effort
+		targetName := strings.TrimPrefix(base, ".wh.")
+		if err := safeRemoveWhiteoutTarget(root, path, targetName); err != nil {
+			return err
+		}
 		return os.Remove(path)
 	})
+}
+
+func safeRemoveWhiteoutTarget(root, whiteoutPath, targetName string) error {
+	if targetName == "" || strings.Contains(targetName, string(filepath.Separator)) {
+		return nil
+	}
+	target := filepath.Join(filepath.Dir(whiteoutPath), targetName)
+	rel, err := filepath.Rel(filepath.Clean(root), filepath.Clean(target))
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return nil
+	}
+	_ = os.RemoveAll(target)
+	return nil
 }
 
 func reverseStrings(s []string) []string {

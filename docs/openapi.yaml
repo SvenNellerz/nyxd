@@ -160,6 +160,88 @@ paths:
         "503":
           description: Supervisor or image store unavailable
 
+  /v1/compose/up:
+    post:
+      tags: [containers]
+      summary: Apply a nyx compose file and start the stack
+      description: |
+        Parses a compose file (strict subset: `nyx-compose`, `docker-compose`, `compose`, or `podman-compose`
+        YAML on disk), merges `.env` from the compose directory with the process environment, substitutes
+        `${VAR}` in the raw YAML, pulls missing images, maps services to container specs (including compose
+        healthchecks and volume bind mounts), then starts containers in `depends_on` order via ordered
+        sequential start.
+      operationId: composeUp
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ComposeProjectRequest"
+      responses:
+        "200":
+          description: Stack started
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ComposeUpResponse"
+        "400":
+          description: Invalid body, compose validation, pull, or start error
+        "503":
+          description: Supervisor or image store unavailable
+
+  /v1/compose/stop:
+    post:
+      tags: [containers]
+      summary: Stop all services from a compose file
+      description: |
+        Resolves the same project + container IDs as `compose/up`, then stops each service in reverse
+        dependency order. Missing containers are ignored (idempotent).
+      operationId: composeStop
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ComposeProjectRequest"
+      responses:
+        "200":
+          description: Stop completed (per-service errors are not partial — all-or-nothing when a stop fails)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ComposeStopResponse"
+        "400":
+          description: Invalid body or compose validation error
+        "503":
+          description: Supervisor unavailable
+
+  /v1/compose/down:
+    post:
+      tags: [containers]
+      summary: Remove compose stack containers (and optionally named volume dirs)
+      description: |
+        Stops and removes supervised containers for the stack (reverse dependency order). When
+        `remove_volumes` is true, deletes host directories for **declared** top-level named volumes
+        under `{nyxd base}/volumes/<project>/…` only if no running container still references that path.
+      operationId: composeDown
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ComposeProjectRequest"
+      responses:
+        "200":
+          description: Stack torn down
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ComposeDownResponse"
+        "400":
+          description: Invalid body or compose validation error
+        "503":
+          description: Supervisor unavailable
+
   /v1/containers/{id}/stop:
     post:
       tags: [containers]
@@ -543,6 +625,12 @@ components:
         stream:
           type: boolean
           description: If true, response is NDJSON stream instead of a single JSON object
+        username:
+          type: string
+          description: Optional registry user for Basic auth / token flows during pull
+        password:
+          type: string
+          description: Optional registry password
 
     PullResponseJSON:
       type: object
@@ -692,6 +780,11 @@ components:
             When true, use `application/x-ndjson` for the response if a pull is needed or for the terminal `run` line when no pull (same event schema as `POST /v1/images/pull` plus final `phase: run`).
         healthcheck:
           $ref: "#/components/schemas/RunHealthcheck"
+        registry_username:
+          type: string
+          description: Optional registry credentials when a pull is required before run
+        registry_password:
+          type: string
 
     RunHealthcheck:
       type: object
@@ -725,6 +818,72 @@ components:
         start_period:
           type: string
           description: Grace period before failures count (Go duration).
+
+    ComposeProjectRequest:
+      type: object
+      description: |
+        Provide **either** `file` (path on the daemon host) **or** `yaml` plus `context_dir`.
+        The optional `remove_volumes` flag is honored only by **`POST /v1/compose/down`**.
+      properties:
+        file:
+          type: string
+          description: Path to compose file readable by nyxd (e.g. `nyx-compose.yaml`, `docker-compose.yml`)
+        yaml:
+          type: string
+          description: Full compose document as a string (requires `context_dir`)
+        context_dir:
+          type: string
+          description: Directory used for `.env` loading and resolving relative bind mounts when `yaml` is set
+        project:
+          type: string
+          description: |
+            Prefix for named volume directories and container IDs. Defaults to the compose filename stem
+            (when using `file`) or the basename of `context_dir` (when using `yaml`). Use the same value
+            for `up`, `stop`, and `down`.
+        remove_volumes:
+          type: boolean
+          description: When true (compose down only), delete on-disk named volume directories declared in the file after containers are removed
+
+    ComposeUpResponse:
+      type: object
+      required: [ok, ids]
+      properties:
+        ok:
+          type: boolean
+        ids:
+          type: array
+          items:
+            type: string
+          description: Container IDs started, in dependency order
+
+    ComposeStopResponse:
+      type: object
+      required: [ok, stopped]
+      properties:
+        ok:
+          type: boolean
+        stopped:
+          type: array
+          items:
+            type: string
+          description: Container IDs stopped, in reverse dependency order
+
+    ComposeDownResponse:
+      type: object
+      required: [ok, removed]
+      properties:
+        ok:
+          type: boolean
+        removed:
+          type: array
+          items:
+            type: string
+          description: Container IDs removed, in reverse dependency order
+        removed_volume_paths:
+          type: array
+          items:
+            type: string
+          description: Host paths deleted when `remove_volumes` was true (omitted when empty)
 
     RunResponse:
       type: object
