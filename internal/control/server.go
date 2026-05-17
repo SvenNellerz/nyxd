@@ -21,6 +21,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/zrougamed/nyxd/internal/health"
 	"github.com/zrougamed/nyxd/internal/image"
 	"github.com/zrougamed/nyxd/internal/network"
 	"github.com/zrougamed/nyxd/internal/runtime"
@@ -458,6 +459,17 @@ func (s *Server) handleImagePull(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+type runHealthJSON struct {
+	Type        string   `json:"type"`
+	Command     []string `json:"command,omitempty"`
+	URL         string   `json:"url,omitempty"`
+	Address     string   `json:"address,omitempty"`
+	Interval    string   `json:"interval,omitempty"`
+	Timeout     string   `json:"timeout,omitempty"`
+	Retries     int      `json:"retries,omitempty"`
+	StartPeriod string   `json:"start_period,omitempty"`
+}
+
 type runRequest struct {
 	ID       string   `json:"id,omitempty"`
 	Image    string   `json:"image"`
@@ -475,6 +487,8 @@ type runRequest struct {
 		ContainerPort int    `json:"containerPort"`
 		Protocol      string `json:"protocol,omitempty"`
 	} `json:"ports,omitempty"`
+	// Healthcheck optional readiness + ongoing checks (exec/http/tcp).
+	Healthcheck *runHealthJSON `json:"healthcheck,omitempty"`
 }
 
 func (s *Server) handleContainerRun(w http.ResponseWriter, r *http.Request) {
@@ -615,6 +629,12 @@ func (s *Server) handleContainerRun(w http.ResponseWriter, r *http.Request) {
 		ReadOnly:       false,
 		PortMappings:   portMaps,
 	}
+	if hc, err := parseRunHealthcheck(body.Healthcheck); err != nil {
+		http.Error(w, "healthcheck: "+err.Error(), http.StatusBadRequest)
+		return
+	} else {
+		spec.Healthcheck = hc
+	}
 	if err := s.sup.Start(baseCtx, spec); err != nil {
 		s.log.Warn("run: start failed", "id", id, "image", imgRef, "err", err)
 		msg := image.TrimUserMessage(err)
@@ -652,6 +672,61 @@ func parseRestartPolicy(s string) supervisor.RestartPolicy {
 	default:
 		return supervisor.RestartNever
 	}
+}
+
+func parseRunHealthcheck(j *runHealthJSON) (*health.Config, error) {
+	if j == nil {
+		return nil, nil
+	}
+	typ := health.Type(strings.ToLower(strings.TrimSpace(j.Type)))
+	if typ == "" {
+		return nil, fmt.Errorf("missing type")
+	}
+	cfg := &health.Config{
+		Type:    typ,
+		Command: append([]string(nil), j.Command...),
+		URL:     strings.TrimSpace(j.URL),
+		Address: strings.TrimSpace(j.Address),
+		Retries: j.Retries,
+	}
+	var err error
+	if j.Interval != "" {
+		cfg.Interval, err = time.ParseDuration(j.Interval)
+		if err != nil {
+			return nil, fmt.Errorf("interval: %w", err)
+		}
+	}
+	if j.Timeout != "" {
+		cfg.Timeout, err = time.ParseDuration(j.Timeout)
+		if err != nil {
+			return nil, fmt.Errorf("timeout: %w", err)
+		}
+	}
+	if j.StartPeriod != "" {
+		cfg.StartPeriod, err = time.ParseDuration(j.StartPeriod)
+		if err != nil {
+			return nil, fmt.Errorf("start_period: %w", err)
+		}
+	}
+	switch typ {
+	case health.TypeExec:
+		if len(cfg.Command) == 0 {
+			return nil, fmt.Errorf("exec requires command")
+		}
+	case health.TypeHTTP:
+		if cfg.URL == "" {
+			return nil, fmt.Errorf("http requires url")
+		}
+	case health.TypeTCP:
+		if cfg.Address == "" {
+			return nil, fmt.Errorf("tcp requires address")
+		}
+	case health.TypeNone:
+		return cfg, nil
+	default:
+		return nil, fmt.Errorf("unknown type %q", j.Type)
+	}
+	return cfg, nil
 }
 
 func generateContainerID(image string) string {

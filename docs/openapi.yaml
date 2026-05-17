@@ -690,6 +690,41 @@ components:
           type: boolean
           description: |
             When true, use `application/x-ndjson` for the response if a pull is needed or for the terminal `run` line when no pull (same event schema as `POST /v1/images/pull` plus final `phase: run`).
+        healthcheck:
+          $ref: "#/components/schemas/RunHealthcheck"
+
+    RunHealthcheck:
+      type: object
+      description: |
+        Optional readiness and ongoing checks. The daemon waits until the first successful probe (within a bounded budget) before returning from a non-streaming run, then continues checking in the background. Unhealthy transitions trigger a kill so restart policy can respawn the workload.
+      required: [type]
+      properties:
+        type:
+          type: string
+          enum: [exec, http, tcp, none]
+        command:
+          type: array
+          items:
+            type: string
+          description: Required for `exec` — argv inside the container (`crun exec`).
+        url:
+          type: string
+          description: Required for `http` — GET target expecting 2xx.
+        address:
+          type: string
+          description: Required for `tcp` — host:port to dial.
+        interval:
+          type: string
+          description: Go duration string for background checks (e.g. `30s`).
+        timeout:
+          type: string
+          description: Per-probe timeout (e.g. `10s`).
+        retries:
+          type: integer
+          description: Consecutive failures before declaring unhealthy.
+        start_period:
+          type: string
+          description: Grace period before failures count (Go duration).
 
     RunResponse:
       type: object

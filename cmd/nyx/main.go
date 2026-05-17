@@ -55,7 +55,7 @@ func run(args []string) error {
 	}
 	if len(args) < 1 {
 		usage()
-		return fmt.Errorf("missing command")
+		return fmt.Errorf("no command specified; try nyx --help")
 	}
 
 	switch args[0] {
@@ -94,32 +94,55 @@ func run(args []string) error {
 }
 
 func usage() {
-	fmt.Fprintf(os.Stderr, `usage: nyx [-socket PATH] <command> [args]
+	fmt.Fprintf(os.Stderr, `nyx — CLI for nyxd (container daemon over a Unix socket)
 
-Commands:
-  ping              GET /v1/ping
-  version           GET /v1/version
-  pull [--json] <ref>   streamed progress + summary (use --json for raw JSON)
-  run [flags] <image> [-- <argv...>]   start container (-d prints id; --json for full JSON; foreground streams pull progress)
-      Foreground (no -d): stream container logs until the workload exits (like docker run).
-      Flags:
-        --print-id          print container id on stderr when attaching (default: off)
-        -p, --publish HOST:CONTAINER[/tcp|/udp]   (repeatable; e.g. -p 8080:80)
-        -e, --env KEY=VAL                       (repeatable)
-        --name <id>   -d, --detach   --hostname <h>   --restart <policy>
-        -h <hostname>   (use "nyx --help" before the command for client help)
-  ps [-q] [--no-trunc]     list containers
-  logs [-f] [--tail N] [-n N] <id>   container logs (GET /v1/containers/{id}/logs)
-  stop <id> [<id>...]      stop one or more containers
-  rm <id> [<id>...]        remove container(s) (POST /v1/containers/{id}/remove)
-  image ls                 list pulled image refs
-  image rm <ref> [<ref>...]   remove image metadata (POST /v1/images/remove)
-  image prune [--dry-run|-n]   remove pulled images not used by any running container
-  container <ls|list|rm|logs>   aliases for ps / rm / logs
-  exec [-i] [-t] [-it] <id> [--] <argv...>   exec in container (-i streams stdin; -t is accepted but there is still no PTY, so shells are line-based only)
+usage:
+  nyx [global-options] <command> [args ...]
 
-Environment:
-  NYXD_SOCKET   default control socket (default %s)
+global-options (before <command>):
+  -socket PATH | -socket=PATH   control socket (default when NYXD_SOCKET unset: %s)
+  -h, --help                   show this help (must come before the command name)
+
+commands:
+  ping
+      check that nyxd is reachable
+  version
+      print daemon version / build info
+  pull [--json] <ref>
+      pull an image into the local store; default shows progress, --json streams raw events
+  run [flags] <image> [-- <argv...>]
+      start a container. default: stay attached and stream logs until the workload exits.
+      -d / --detach: start in the background and print the container id.
+      flags:
+        --name <id>                 container id (default: auto-generated)
+        -p, --publish HOST:PORT[/tcp|udp]   port mapping (repeatable, e.g. -p 8080:80)
+        -e, --env KEY=VAL           environment (repeatable)
+        --hostname <h> | -h <h>     hostname in container (-h here is hostname, not help)
+        --restart <policy>          always | on-failure | unless-stopped | never
+        --print-id                  when attached, also print id on stderr
+        --json                      machine-readable pull/run output
+  ps [-q] [--no-trunc]
+      list containers
+  logs [-f] [--tail N|-n N] <id>
+      show container logs; -f follows new lines
+  stop <id> [<id>...]
+      send graceful stop (SIGTERM / image stop signal, then wait)
+  rm <id> [<id>...]
+      remove container(s) and their supervisor state
+  image ls
+      list image refs present in the local store
+  image rm <ref> [<ref>...]
+      remove local image metadata (layers may be pruned if unreferenced)
+  image prune [--dry-run|-n]
+      delete pulled images not referenced by any running container
+  container <ls|list|rm|logs> ...
+      aliases: same as ps, rm, logs with different word order
+  exec [-i] [-t|-it] <id> [--] <argv...>
+      run a command in a running container; -i streams stdin from this terminal.
+      -t is accepted but there is no PTY — shells are line-based only.
+
+environment:
+  NYXD_SOCKET   default control socket path
 `, defaultSocket())
 }
 

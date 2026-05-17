@@ -43,6 +43,7 @@ type Config struct {
 	Version      bool
 	Socket       string // Unix socket for HTTP control API; empty disables
 	SocketGroup  string // optional POSIX group for socket (0660); lets non-root users in that group run nyx
+	PullPlatform string // OCI platform for multi-arch indexes, e.g. linux/arm64; empty uses GOOS/GOARCH
 }
 
 func main() {
@@ -82,6 +83,7 @@ func run(ctx context.Context, cfg Config, logger *slog.Logger) error {
 	if err != nil {
 		return fmt.Errorf("image store: %w", err)
 	}
+	imgStore.SetPlatform(cfg.PullPlatform)
 
 	ovl, err := overlay.NewManager(cfg.BaseDir + "/overlay")
 	if err != nil {
@@ -152,6 +154,7 @@ func parseFlags() Config {
 	flag.StringVar(&cfg.LogLevel, "log-level", "info", "Log level: debug|info|warn|error")
 	flag.StringVar(&cfg.Socket, "socket", "/run/nyxd/nyxd.sock", "Unix socket for HTTP control API (nyx client); set to \"\" to disable")
 	flag.StringVar(&cfg.SocketGroup, "socket-group", "", "POSIX group name for the socket (mode 0660, chown root:group); add users to this group so nyx works without sudo")
+	flag.StringVar(&cfg.PullPlatform, "pull-platform", "", "OCI platform for multi-arch manifests (e.g. linux/arm64); default uses this binary's GOOS/GOARCH")
 	flag.BoolVar(&cfg.Version, "version", false, "Print version and exit")
 	flag.Parse()
 	return cfg

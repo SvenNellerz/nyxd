@@ -163,6 +163,7 @@ func (s *Supervisor) reconcilePersisted() {
 		s.mu.Unlock()
 
 		s.log.Info("re-adopted supervised container from disk", "id", id, "image", rec.Spec.Image, "ip", rec.IP)
+		s.startHealthMonitor(context.Background(), entry)
 		s.wg.Add(1)
 		// Daemon-lifetime context: reconcile's short-lived ctx must not cancel supervision.
 		go s.supervise(context.Background(), entry)

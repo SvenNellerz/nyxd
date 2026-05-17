@@ -1,4 +1,4 @@
-// Package runtime wraps crun (or runc) as an OCI runtime.
+// Package runtime wraps crun as an OCI runtime.
 // All communication is via crun's CLI - no shared library, no CGO.
 package runtime
 
@@ -19,10 +19,10 @@ import (
 
 // State mirrors crun's container state output.
 type State struct {
-	ID          string `json:"id"`
-	Status      string `json:"status"` // created, running, stopped
-	Pid         int    `json:"pid"`
-	Bundle      string `json:"bundle"`
+	ID          string            `json:"id"`
+	Status      string            `json:"status"` // created, running, stopped
+	Pid         int               `json:"pid"`
+	Bundle      string            `json:"bundle"`
 	Annotations map[string]string `json:"annotations,omitempty"`
 	// ExitCode is populated by some runtimes (e.g. crun) when status is stopped.
 	ExitCode *int `json:"exit_code,omitempty"`
@@ -30,7 +30,7 @@ type State struct {
 
 // Runtime wraps crun/runc CLI.
 type Runtime struct {
-	binary  string // path to crun or runc
+	binary  string // path to crun
 	rootDir string // --root: crun state directory (only OCI layout; no extra files here)
 	pidDir  string // --pid-file targets; must not live under rootDir or crun list breaks on *.pid names
 }
@@ -56,6 +56,12 @@ func New(binary, stateDir string) (*Runtime, error) {
 	}
 	return &Runtime{binary: binary, rootDir: stateDir, pidDir: pidDir}, nil
 }
+
+// Binary returns the resolved crun executable path.
+func (r *Runtime) Binary() string { return r.binary }
+
+// RootDir returns crun's --root state directory.
+func (r *Runtime) RootDir() string { return r.rootDir }
 
 func (r *Runtime) pidFilePath(containerID string) string {
 	return filepath.Join(r.pidDir, containerID+".pid")

@@ -62,18 +62,7 @@ type Checker struct {
 
 // New creates a Checker. onUnhealthy is called (once) when a container fails its healthcheck.
 func New(containerID string, cfg Config, crunBin, crunRoot string, log *slog.Logger, onUnhealthy func(string)) *Checker {
-	if cfg.Interval == 0 {
-		cfg.Interval = 30 * time.Second
-	}
-	if cfg.Timeout == 0 {
-		cfg.Timeout = 10 * time.Second
-	}
-	if cfg.Retries == 0 {
-		cfg.Retries = 3
-	}
-	if cfg.StartPeriod == 0 {
-		cfg.StartPeriod = 0
-	}
+	cfg = Normalize(cfg)
 	return &Checker{
 		containerID: containerID,
 		cfg:         cfg,
@@ -83,6 +72,20 @@ func New(containerID string, cfg Config, crunBin, crunRoot string, log *slog.Log
 		status:      StatusStarting,
 		onUnhealthy: onUnhealthy,
 	}
+}
+
+// Normalize applies the same defaults as [New] (interval, timeout, retries).
+func Normalize(cfg Config) Config {
+	if cfg.Interval == 0 {
+		cfg.Interval = 30 * time.Second
+	}
+	if cfg.Timeout == 0 {
+		cfg.Timeout = 10 * time.Second
+	}
+	if cfg.Retries == 0 {
+		cfg.Retries = 3
+	}
+	return cfg
 }
 
 // Start begins running health checks in the background.
@@ -136,20 +139,13 @@ func (c *Checker) loop(ctx context.Context) {
 }
 
 func (c *Checker) check(ctx context.Context) {
+	if c.cfg.Type == TypeNone || c.cfg.Type == "" {
+		return
+	}
 	checkCtx, cancel := context.WithTimeout(ctx, c.cfg.Timeout)
 	defer cancel()
 
-	var err error
-	switch c.cfg.Type {
-	case TypeExec:
-		err = c.checkExec(checkCtx)
-	case TypeHTTP:
-		err = c.checkHTTP(checkCtx)
-	case TypeTCP:
-		err = c.checkTCP(checkCtx)
-	case TypeNone, "":
-		return
-	}
+	err := Probe(checkCtx, c.cfg, c.containerID, c.crunBin, c.crunRoot)
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -177,28 +173,41 @@ func (c *Checker) check(ctx context.Context) {
 	}
 }
 
-// checkExec runs a command inside the container using crun exec.
-func (c *Checker) checkExec(ctx context.Context) error {
-	if len(c.cfg.Command) == 0 {
+// Probe runs a single health probe (same semantics as one Checker evaluation).
+func Probe(ctx context.Context, cfg Config, containerID, crunBin, crunRoot string) error {
+	switch cfg.Type {
+	case TypeNone, "":
+		return nil
+	case TypeExec:
+		return probeExec(ctx, cfg, containerID, crunBin, crunRoot)
+	case TypeHTTP:
+		return probeHTTP(ctx, cfg)
+	case TypeTCP:
+		return probeTCP(ctx, cfg)
+	default:
+		return fmt.Errorf("unknown healthcheck type %q", cfg.Type)
+	}
+}
+
+func probeExec(ctx context.Context, cfg Config, containerID, crunBin, crunRoot string) error {
+	if len(cfg.Command) == 0 {
 		return fmt.Errorf("exec healthcheck: no command")
 	}
-	// crun exec <id> <cmd...>
-	args := []string{"--root", c.crunRoot, "exec", c.containerID}
-	args = append(args, c.cfg.Command...)
-	cmd := exec.CommandContext(ctx, c.crunBin, args...)
+	args := []string{"--root", crunRoot, "exec", containerID}
+	args = append(args, cfg.Command...)
+	cmd := exec.CommandContext(ctx, crunBin, args...)
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("exec: %w", err)
 	}
 	return nil
 }
 
-// checkHTTP sends a GET to the configured URL and expects 2xx.
-func (c *Checker) checkHTTP(ctx context.Context) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.cfg.URL, nil)
+func probeHTTP(ctx context.Context, cfg Config) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, cfg.URL, nil)
 	if err != nil {
 		return err
 	}
-	client := &http.Client{} // timeout already on ctx
+	client := &http.Client{}
 	resp, err := client.Do(req)
 	if err != nil {
 		return err
@@ -210,13 +219,49 @@ func (c *Checker) checkHTTP(ctx context.Context) error {
 	return nil
 }
 
-// checkTCP dials the configured address and expects a successful connection.
-func (c *Checker) checkTCP(ctx context.Context) error {
+func probeTCP(ctx context.Context, cfg Config) error {
 	d := &net.Dialer{}
-	conn, err := d.DialContext(ctx, "tcp", c.cfg.Address)
+	conn, err := d.DialContext(ctx, "tcp", cfg.Address)
 	if err != nil {
 		return err
 	}
 	conn.Close()
 	return nil
+}
+
+// WaitReady repeatedly probes until success, ctx is cancelled, or the deadline from ctx expires.
+// Honors cfg.StartPeriod (sleep before first probe). Uses cfg.Timeout per attempt.
+func WaitReady(ctx context.Context, log *slog.Logger, cfg Config, containerID, crunBin, crunRoot string) error {
+	if cfg.Type == TypeNone || cfg.Type == "" {
+		return nil
+	}
+	if cfg.StartPeriod > 0 {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(cfg.StartPeriod):
+		}
+	}
+	const tick = 500 * time.Millisecond
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+		pctx, cancel := context.WithTimeout(ctx, cfg.Timeout)
+		err := Probe(pctx, cfg, containerID, crunBin, crunRoot)
+		cancel()
+		if err == nil {
+			return nil
+		}
+		if log != nil {
+			log.Debug("readiness probe failed", "id", containerID, "err", err)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(tick):
+		}
+	}
 }

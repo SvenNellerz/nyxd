@@ -71,6 +71,7 @@ type containerEntry struct {
 	restarts  int
 	stopped   bool // intentionally stopped - don't restart
 	logCancel context.CancelFunc
+	checker   *health.Checker
 	mu        sync.Mutex
 }
 
@@ -112,6 +113,10 @@ func New(rt *runtime.Runtime, ovl *overlay.Manager, net network.Backend, baseDir
 
 // Start launches a container according to its spec and supervises it.
 func (s *Supervisor) Start(ctx context.Context, spec ContainerSpec) error {
+	if spec.Healthcheck != nil {
+		n := health.Normalize(*spec.Healthcheck)
+		spec.Healthcheck = &n
+	}
 	s.mu.Lock()
 	if _, exists := s.containers[spec.ID]; exists {
 		s.mu.Unlock()
@@ -139,9 +144,37 @@ func (s *Supervisor) Start(ctx context.Context, spec ContainerSpec) error {
 		return nil
 	}
 
+	if spec.Healthcheck != nil {
+		rctx, rcancel := readinessWaitContext(ctx, spec.Healthcheck)
+		err := health.WaitReady(rctx, s.log, *spec.Healthcheck, spec.ID, s.rt.Binary(), s.rt.RootDir())
+		rcancel()
+		if err != nil {
+			s.abortAfterFailedReadiness(ctx, entry)
+			s.mu.Lock()
+			delete(s.containers, spec.ID)
+			s.mu.Unlock()
+			s.removePersistedState(spec.ID)
+			return fmt.Errorf("readiness: %w", err)
+		}
+	}
+
+	s.startHealthMonitor(ctx, entry)
+
 	s.wg.Add(1)
 	go s.supervise(ctx, entry)
 
+	return nil
+}
+
+// StartSequential calls [Supervisor.Start] for each spec in order.
+// Callers should pass specs ordered by dependencies (e.g. [compose.TopologicalOrder] mapped to specs)
+// so dependents start after dependencies complete startup (including readiness probes).
+func (s *Supervisor) StartSequential(ctx context.Context, specs []ContainerSpec) error {
+	for _, sp := range specs {
+		if err := s.Start(ctx, sp); err != nil {
+			return fmt.Errorf("start %s: %w", sp.ID, err)
+		}
+	}
 	return nil
 }
 
@@ -272,6 +305,35 @@ func (s *Supervisor) Kill(_ context.Context, id string, signal string) error {
 		return err
 	}
 	s.log.Info("container stopped after kill", "id", id, "signal", signal)
+	return nil
+}
+
+// KillForRestart force-stops the workload without marking it intentionally stopped,
+// so the supervisor loop can apply the restart policy after a health failure.
+func (s *Supervisor) KillForRestart(ctx context.Context, id string) error {
+	s.mu.RLock()
+	entry, ok := s.containers[id]
+	s.mu.RUnlock()
+	if !ok {
+		return fmt.Errorf("container %s not found", id)
+	}
+
+	s.resetLogIO(entry)
+
+	killCtx, kcancel := context.WithTimeout(ctx, 20*time.Second)
+	defer kcancel()
+	s.log.Info("health restart: kill container", "id", id)
+	err := s.rt.Kill(killCtx, id, "KILL")
+	if err != nil && !runtime.CrunContainerAbsent(err) {
+		return fmt.Errorf("kill container: %w", err)
+	}
+
+	waitCtx, wcancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer wcancel()
+	if err := s.waitStoppedOrForceDelete(waitCtx, id, "health_restart"); err != nil {
+		return err
+	}
+	s.log.Info("container stopped for health restart", "id", id)
 	return nil
 }
 
@@ -415,6 +477,84 @@ func (s *Supervisor) Shutdown(ctx context.Context) {
 	}
 	wg.Wait()
 	s.wg.Wait()
+}
+
+func readinessWaitContext(parent context.Context, cfg *health.Config) (context.Context, context.CancelFunc) {
+	if cfg == nil {
+		return parent, func() {}
+	}
+	tick := 500 * time.Millisecond
+	attempts := cfg.Retries + 8
+	if attempts < 10 {
+		attempts = 10
+	}
+	budget := cfg.StartPeriod + time.Duration(attempts)*(cfg.Timeout+tick)
+	if budget < 45*time.Second {
+		budget = 45 * time.Second
+	}
+	if budget > 15*time.Minute {
+		budget = 15 * time.Minute
+	}
+	return context.WithTimeout(parent, budget)
+}
+
+func (s *Supervisor) abortAfterFailedReadiness(ctx context.Context, e *containerEntry) {
+	id := e.spec.ID
+	log := s.log.With("id", id)
+	log.Warn("tearing down container after readiness failure")
+	s.resetLogIO(e)
+	killCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	if err := s.rt.Kill(killCtx, id, "KILL"); err != nil && !runtime.CrunContainerAbsent(err) {
+		log.Warn("readiness abort kill", "err", err)
+	}
+	waitCtx, wcancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer wcancel()
+	if err := s.waitStoppedOrForceDelete(waitCtx, id, "readiness_abort"); err != nil {
+		log.Warn("readiness abort wait", "err", err)
+	}
+	s.teardownNetwork(ctx, id)
+	s.ovl.Remove(id) //nolint:errcheck
+	_ = s.rt.Delete(ctx, id, true)
+}
+
+func (s *Supervisor) startHealthMonitor(parent context.Context, e *containerEntry) {
+	if e.spec.Healthcheck == nil {
+		return
+	}
+	hc := *e.spec.Healthcheck
+	if hc.Type == health.TypeNone || hc.Type == "" {
+		return
+	}
+	onUnhealthy := func(id string) {
+		tmp := &containerEntry{spec: e.spec}
+		if !s.shouldRestart(tmp, 1) {
+			s.log.Info("healthcheck unhealthy; restart policy does not restart", "id", id, "policy", e.spec.RestartPolicy)
+			return
+		}
+		go func(id string) {
+			killCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			defer cancel()
+			if err := s.KillForRestart(killCtx, id); err != nil {
+				s.log.Warn("health-driven restart failed", "id", id, "err", err)
+			}
+		}(id)
+	}
+	chk := health.New(e.spec.ID, hc, s.rt.Binary(), s.rt.RootDir(), s.log, onUnhealthy)
+	e.mu.Lock()
+	e.checker = chk
+	e.mu.Unlock()
+	chk.Start(parent)
+}
+
+func (e *containerEntry) stopHealth() {
+	e.mu.Lock()
+	c := e.checker
+	e.checker = nil
+	e.mu.Unlock()
+	if c != nil {
+		c.Stop()
+	}
 }
 
 // ─── Internal ──────────────────────────────────────────────────────────────────
@@ -601,6 +741,8 @@ func (s *Supervisor) supervise(ctx context.Context, e *containerEntry) {
 			log.Warn("wait error", "err", err)
 		}
 
+		e.stopHealth()
+
 		e.mu.Lock()
 		intentionallyStopped := e.stopped
 		e.mu.Unlock()
@@ -719,6 +861,7 @@ func (s *Supervisor) teardownNetwork(ctx context.Context, id string) {
 }
 
 func (s *Supervisor) cleanup(e *containerEntry) {
+	e.stopHealth()
 	s.resetLogIO(e)
 	if s.logColl != nil {
 		s.logColl.Remove(e.spec.ID)

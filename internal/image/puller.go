@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -54,8 +55,9 @@ func ParseRef(input string) (ParsedRef, error) {
 //	<storeRoot>/blobs/sha256/<hex>          – raw compressed blobs
 //	<storeRoot>/images/<repo>/<tag>/        – manifest.json + config.json
 type Store struct {
-	root string
-	mu   sync.RWMutex
+	root     string
+	mu       sync.RWMutex
+	platform string // e.g. "linux/arm64"; empty => runtime.GOOS/GOARCH when pulling indexes
 }
 
 // NewStore creates (or opens) a blob store at root.
@@ -66,6 +68,28 @@ func NewStore(root string) (*Store, error) {
 		}
 	}
 	return &Store{root: root}, nil
+}
+
+// SetPlatform sets the OS/architecture used when resolving multi-platform indexes (e.g. "linux/arm64").
+// Pass empty to use the daemon's runtime.GOOS and runtime.GOARCH.
+func (s *Store) SetPlatform(osArch string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.platform = strings.TrimSpace(osArch)
+}
+
+func (s *Store) pullPlatform() (osName, archName string) {
+	s.mu.RLock()
+	p := strings.TrimSpace(s.platform)
+	s.mu.RUnlock()
+	if p == "" {
+		p = fmt.Sprintf("%s/%s", runtime.GOOS, runtime.GOARCH)
+	}
+	a, b, ok := strings.Cut(p, "/")
+	if !ok || a == "" || b == "" {
+		return "linux", "amd64"
+	}
+	return a, b
 }
 
 // Pull fetches an image from a registry and caches blobs locally.
@@ -98,6 +122,7 @@ func (s *Store) PullWithProgress(ctx context.Context, ref string, on func(PullEv
 		repo:     repo,
 		hc:       &http.Client{Timeout: 30 * time.Second},
 	}
+	client.wantOS, client.wantArch = s.pullPlatform()
 
 	if err := client.auth(ctx); err != nil {
 		return nil, fmt.Errorf("pull auth %s: %w", ref, err)
@@ -248,7 +273,8 @@ func (s *Store) ListImageRefs() ([]string, error) {
 	return out, nil
 }
 
-// RemoveImage deletes local metadata for ref (manifest + config). Blobs are left in the content store.
+// RemoveImage deletes local metadata for ref (manifest + config) and prunes layer blobs
+// that are no longer referenced by any remaining image metadata.
 func (s *Store) RemoveImage(ref string) error {
 	if _, _, err := s.LoadImageMeta(ref); err != nil {
 		return err
@@ -258,7 +284,70 @@ func (s *Store) RemoveImage(ref string) error {
 	if err := os.RemoveAll(dir); err != nil {
 		return fmt.Errorf("remove image dir: %w", err)
 	}
+	if _, err := s.PruneUnreferencedBlobs(); err != nil {
+		return fmt.Errorf("prune blobs after remove: %w", err)
+	}
 	return nil
+}
+
+// PruneUnreferencedBlobs deletes blobs under blobs/sha256 that are not referenced by any
+// manifest.json under images/. Returns the number of files removed.
+func (s *Store) PruneUnreferencedBlobs() (int, error) {
+	refDigests, err := s.collectReferencedDigests()
+	if err != nil {
+		return 0, err
+	}
+	blobDir := filepath.Join(s.root, "blobs", "sha256")
+	ents, err := os.ReadDir(blobDir)
+	if err != nil {
+		return 0, err
+	}
+	removed := 0
+	for _, e := range ents {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if strings.HasSuffix(name, ".partial") {
+			continue
+		}
+		if len(name) != 64 {
+			continue
+		}
+		d := "sha256:" + name
+		if refDigests[d] {
+			continue
+		}
+		if err := os.Remove(filepath.Join(blobDir, name)); err != nil && !os.IsNotExist(err) {
+			return removed, fmt.Errorf("remove blob %s: %w", name, err)
+		}
+		removed++
+	}
+	return removed, nil
+}
+
+func (s *Store) collectReferencedDigests() (map[string]bool, error) {
+	out := make(map[string]bool)
+	imagesRoot := filepath.Join(s.root, "images")
+	_ = filepath.WalkDir(imagesRoot, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() || d.Name() != "manifest.json" {
+			return nil
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil
+		}
+		var m oci.Manifest
+		if json.Unmarshal(data, &m) != nil {
+			return nil
+		}
+		out[m.Config.Digest] = true
+		for _, layer := range m.Layers {
+			out[layer.Digest] = true
+		}
+		return nil
+	})
+	return out, nil
 }
 
 // PruneImagesNotIn removes local image metadata for refs not in keepRefs.
@@ -390,6 +479,7 @@ func (s *Store) fetchBlob(ctx context.Context, client *registryClient, desc oci.
 }
 
 // fetchBlobToDisk streams a blob to the content store without holding the full payload in memory.
+// Interrupted downloads leave "<dest>.partial"; a subsequent pull resumes with HTTP Range when supported.
 func (s *Store) fetchBlobToDisk(ctx context.Context, client *registryClient, desc oci.Descriptor, onProgress func(int64)) error {
 	dest := s.BlobPath(desc.Digest)
 	if st, err := os.Stat(dest); err == nil {
@@ -399,46 +489,105 @@ func (s *Store) fetchBlobToDisk(ctx context.Context, client *registryClient, des
 		return nil
 	}
 
-	rc, err := client.blob(ctx, desc.Digest)
+	partial := dest + ".partial"
+	for attempt := 0; attempt < 3; attempt++ {
+		err := s.fetchBlobToDiskOnce(ctx, client, desc, dest, partial, onProgress, attempt > 0)
+		if err == nil {
+			return nil
+		}
+		if errors.Is(err, errBlobRangeFallback) {
+			_ = os.Remove(partial)
+			continue
+		}
+		return err
+	}
+	return fmt.Errorf("fetch blob %s: too many retries", desc.Digest)
+}
+
+var errBlobRangeFallback = errors.New("blob: restart without range")
+
+func (s *Store) fetchBlobToDiskOnce(ctx context.Context, client *registryClient, desc oci.Descriptor, dest, partial string, onProgress func(int64), forceFull bool) error {
+	var start int64
+	h := sha256.New()
+	if !forceFull {
+		if st, err := os.Stat(partial); err == nil && st.Size() > 0 {
+			if st.Size() > desc.Size {
+				_ = os.Remove(partial)
+			} else {
+				f, err := os.Open(partial)
+				if err == nil {
+					n, err := io.Copy(h, f)
+					f.Close()
+					if err == nil && n == st.Size() {
+						start = st.Size()
+					} else {
+						_ = os.Remove(partial)
+						h = sha256.New()
+					}
+				}
+			}
+		}
+	} else {
+		_ = os.Remove(partial)
+	}
+
+	if start == desc.Size {
+		got := fmt.Sprintf("sha256:%x", h.Sum(nil))
+		if got != desc.Digest {
+			_ = os.Remove(partial)
+			return fmt.Errorf("digest mismatch on partial: want %s got %s", desc.Digest, got)
+		}
+		if onProgress != nil {
+			onProgress(desc.Size)
+		}
+		return os.Rename(partial, dest)
+	}
+
+	rc, err := client.blob(ctx, desc.Digest, start)
 	if err != nil {
 		return fmt.Errorf("fetch blob %s: %w", desc.Digest, err)
 	}
 	defer rc.Close()
 
-	tmp, err := os.CreateTemp(filepath.Dir(dest), ".tmp-blob-*")
+	flags := os.O_WRONLY | os.O_CREATE
+	if start == 0 {
+		flags |= os.O_TRUNC
+	} else {
+		flags |= os.O_APPEND
+	}
+	out, err := os.OpenFile(partial, flags, 0o600)
 	if err != nil {
 		return err
 	}
-	tmpName := tmp.Name()
 
-	cleanup := func() {
-		tmp.Close()
-		os.Remove(tmpName)
+	base := start
+	wrapOn := func(n int64) {
+		if onProgress != nil {
+			onProgress(base + n)
+		}
 	}
-
-	h := sha256.New()
-	pr := newProgressReader(rc, onProgress)
+	pr := newProgressReader(rc, wrapOn)
 	tee := io.TeeReader(pr, h)
 	buf := make([]byte, layerBufSize)
-
-	if _, err := io.CopyBuffer(tmp, tee, buf); err != nil {
-		cleanup()
+	if _, err := io.CopyBuffer(out, tee, buf); err != nil {
+		_ = out.Close()
 		return fmt.Errorf("stream blob: %w", err)
 	}
-	if err := tmp.Sync(); err != nil {
-		cleanup()
+	if err := out.Sync(); err != nil {
+		_ = out.Close()
 		return err
 	}
-	tmp.Close()
+	if err := out.Close(); err != nil {
+		return err
+	}
 
 	got := fmt.Sprintf("sha256:%x", h.Sum(nil))
 	if got != desc.Digest {
-		os.Remove(tmpName)
+		_ = os.Remove(partial)
 		return fmt.Errorf("digest mismatch: want %s got %s", desc.Digest, got)
 	}
-
-	if err := os.Rename(tmpName, dest); err != nil {
-		os.Remove(tmpName)
+	if err := os.Rename(partial, dest); err != nil {
+		_ = os.Remove(partial)
 		return err
 	}
 	return nil
@@ -465,6 +614,8 @@ type registryClient struct {
 	repo     string
 	token    string
 	hc       *http.Client
+	wantOS   string
+	wantArch string
 }
 
 func (c *registryClient) auth(ctx context.Context) error {
@@ -525,31 +676,60 @@ func (c *registryClient) manifest(ctx context.Context, ref string) (*oci.Manifes
 		if err := json.Unmarshal(body, &idx); err != nil {
 			return nil, err
 		}
-		for _, m := range idx.Manifests {
-			if m.Platform != nil && m.Platform.OS == "linux" && m.Platform.Architecture == "amd64" {
-				return c.manifest(ctx, m.Digest)
-			}
+		d, err := pickIndexDigest(idx.Manifests, c.wantOS, c.wantArch)
+		if err != nil {
+			return nil, err
 		}
-		return nil, errors.New("no linux/amd64 manifest in index")
+		return c.manifest(ctx, d)
 	}
 
 	var m oci.Manifest
 	return &m, json.Unmarshal(body, &m)
 }
 
-func (c *registryClient) blob(ctx context.Context, digest string) (io.ReadCloser, error) {
+func pickIndexDigest(manifests []oci.Descriptor, wantOS, wantArch string) (string, error) {
+	if wantOS == "" {
+		wantOS = "linux"
+	}
+	if wantArch == "" {
+		wantArch = "amd64"
+	}
+	for _, m := range manifests {
+		if m.Platform == nil || m.Digest == "" {
+			continue
+		}
+		if m.Platform.OS == wantOS && m.Platform.Architecture == wantArch {
+			return m.Digest, nil
+		}
+	}
+	return "", fmt.Errorf("no manifest in index for platform %s/%s", wantOS, wantArch)
+}
+
+func (c *registryClient) blob(ctx context.Context, digest string, start int64) (io.ReadCloser, error) {
 	url := fmt.Sprintf("https://%s/v2/%s/blobs/%s", c.registry, c.repo, digest)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("Authorization", "Bearer "+c.token)
+	if start > 0 {
+		req.Header.Set("Range", fmt.Sprintf("bytes=%d-", start))
+	}
 
 	resp, err := c.hc.Do(req)
 	if err != nil {
 		return nil, err
 	}
-	if resp.StatusCode != http.StatusOK {
+	if start > 0 {
+		if resp.StatusCode == http.StatusOK {
+			resp.Body.Close()
+			return nil, errBlobRangeFallback
+		}
+		if resp.StatusCode != http.StatusPartialContent {
+			resp.Body.Close()
+			return nil, fmt.Errorf("blob %s: %s", digest, resp.Status)
+		}
+	} else if resp.StatusCode != http.StatusOK {
 		resp.Body.Close()
 		return nil, fmt.Errorf("blob %s: %s", digest, resp.Status)
 	}
