@@ -429,6 +429,7 @@ func (s *Supervisor) List() []string {
 // ContainerInfo is a stable JSON shape for list/ps APIs.
 type ContainerInfo struct {
 	ID     string `json:"id"`
+	ShortID string `json:"short_id"`
 	Image  string `json:"image"`
 	IP     string `json:"ip,omitempty"`
 	Ports  string `json:"ports,omitempty"`
@@ -481,7 +482,14 @@ func (s *Supervisor) ListInfo(_ context.Context) []ContainerInfo {
 
 	out := make([]ContainerInfo, 0, len(snaps))
 	for _, sn := range snaps {
-		info := ContainerInfo{ID: sn.id, Image: sn.img, IP: sn.ip, Ports: sn.ports, Status: "unknown"}
+		info := ContainerInfo{
+			ID:      sn.id,
+			ShortID: DisplayID(sn.id),
+			Image:   sn.img,
+			IP:      sn.ip,
+			Ports:   sn.ports,
+			Status:  "unknown",
+		}
 		if st, err := s.rt.State(stateCtx, sn.id); err == nil && st != nil {
 			info.Status = st.Status
 		} else if err != nil && runtime.CrunContainerAbsent(err) {

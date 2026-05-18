@@ -824,7 +824,19 @@ func parseRef(ref string) (registry, repo, tag string) {
 	default:
 		repo = ref
 	}
-	return
+	registry = normalizeDockerHubRegistry(registry)
+	return registry, repo, tag
+}
+
+// normalizeDockerHubRegistry maps Docker Hub front hostnames to the registry API host.
+// Requests to https://docker.io/v2/... often return HTML; the OCI API lives at registry-1.docker.io.
+func normalizeDockerHubRegistry(host string) string {
+	switch strings.ToLower(strings.TrimSpace(host)) {
+	case "docker.io", "www.docker.io", "registry.docker.io", "hub.docker.com", "registry.hub.docker.com":
+		return defaultRegistry
+	default:
+		return host
+	}
 }
 
 func sanitisePath(s string) string {

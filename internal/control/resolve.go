@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"unicode"
+
+	"github.com/zrougamed/nyxd/internal/supervisor"
 )
 
 var (
@@ -16,7 +18,8 @@ var (
 )
 
 // resolveContainerID maps a user-supplied id to the canonical supervisor id.
-// Accepts exact ids or any unambiguous prefix (including the default 12-char ps prefix).
+// Accepts exact canonical ids, unambiguous canonical prefixes, exact 12-char hex short ids
+// ([supervisor.DisplayID]), or unambiguous hex prefixes of those short ids.
 func (s *Server) resolveContainerID(raw string) (string, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
@@ -26,25 +29,68 @@ func (s *Server) resolveContainerID(raw string) (string, error) {
 		return raw, nil
 	}
 	ids := s.sup.List()
+
 	for _, id := range ids {
 		if id == raw {
 			return id, nil
 		}
 	}
-	var matches []string
-	for _, id := range ids {
-		if strings.HasPrefix(id, raw) {
-			matches = append(matches, id)
+
+	if len(raw) == 12 && isAllHexDigits(raw) {
+		for _, id := range ids {
+			if strings.EqualFold(supervisor.DisplayID(id), raw) {
+				return id, nil
+			}
 		}
 	}
-	switch len(matches) {
-	case 0:
-		return "", fmt.Errorf("%w: %q", errNoSuchContainerID, raw)
-	case 1:
-		return matches[0], nil
-	default:
-		return "", fmt.Errorf("%w: %q matches %v", errAmbiguousContainerID, raw, matches)
+
+	var canonPrefix []string
+	for _, id := range ids {
+		if strings.HasPrefix(id, raw) {
+			canonPrefix = append(canonPrefix, id)
+		}
 	}
+	switch len(canonPrefix) {
+	case 1:
+		return canonPrefix[0], nil
+	case 0:
+		// continue
+	default:
+		return "", fmt.Errorf("%w: %q matches %v", errAmbiguousContainerID, raw, canonPrefix)
+	}
+
+	if isAllHexDigits(raw) && len(raw) >= 1 && len(raw) <= 12 {
+		rl := strings.ToLower(raw)
+		var shortMatches []string
+		for _, id := range ids {
+			sid := strings.ToLower(supervisor.DisplayID(id))
+			if strings.HasPrefix(sid, rl) {
+				shortMatches = append(shortMatches, id)
+			}
+		}
+		switch len(shortMatches) {
+		case 1:
+			return shortMatches[0], nil
+		case 0:
+			return "", fmt.Errorf("%w: %q", errNoSuchContainerID, raw)
+		default:
+			return "", fmt.Errorf("%w: %q matches short ids for %v", errAmbiguousContainerID, raw, shortMatches)
+		}
+	}
+
+	return "", fmt.Errorf("%w: %q", errNoSuchContainerID, raw)
+}
+
+func isAllHexDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if !((r >= '0' && r <= '9') || (r >= 'a' && r <= 'f') || (r >= 'A' && r <= 'F')) {
+			return false
+		}
+	}
+	return true
 }
 
 // safeLogContainerID rejects path injection for log filenames under dataDir/logs/.

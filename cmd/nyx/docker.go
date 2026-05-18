@@ -224,11 +224,12 @@ func doPS(socket string, args []string) error {
 
 	var out struct {
 		Items []struct {
-			ID     string `json:"id"`
-			Image  string `json:"image"`
-			IP     string `json:"ip"`
-			Ports  string `json:"ports"`
-			Status string `json:"status"`
+			ID      string `json:"id"`
+			ShortID string `json:"short_id"`
+			Image   string `json:"image"`
+			IP      string `json:"ip"`
+			Ports   string `json:"ports"`
+			Status  string `json:"status"`
 		} `json:"items"`
 	}
 	if err := json.Unmarshal(body, &out); err != nil {
@@ -236,7 +237,11 @@ func doPS(socket string, args []string) error {
 	}
 	if quiet {
 		for _, it := range out.Items {
-			fmt.Println(it.ID)
+			if it.ShortID != "" {
+				fmt.Println(it.ShortID)
+			} else {
+				fmt.Println(it.ID)
+			}
 		}
 		return nil
 	}
@@ -248,9 +253,14 @@ func doPS(socket string, args []string) error {
 
 	fmt.Println("CONTAINER ID   IMAGE                          STATUS    PORTS                     IP")
 	for _, it := range out.Items {
-		cid := it.ID
-		if !noTrunc && len(cid) > 12 {
-			cid = cid[:12]
+		cid := it.ShortID
+		if noTrunc {
+			cid = it.ID
+		} else if cid == "" {
+			cid = it.ID
+			if len(cid) > 12 {
+				cid = cid[:12]
+			}
 		}
 		img := it.Image
 		if len(img) > 30 {
