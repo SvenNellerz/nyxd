@@ -22,6 +22,7 @@ import (
 	"github.com/zrougamed/nyxd/internal/health"
 	"github.com/zrougamed/nyxd/internal/image"
 	"github.com/zrougamed/nyxd/internal/logs"
+	"github.com/zrougamed/nyxd/internal/netdns"
 	"github.com/zrougamed/nyxd/internal/network"
 	"github.com/zrougamed/nyxd/internal/overlay"
 	"github.com/zrougamed/nyxd/internal/runtime"
@@ -63,6 +64,9 @@ type ContainerSpec struct {
 
 	// ExtraMounts are OCI bind (or other) mounts merged into the bundle after defaults.
 	ExtraMounts []bundle.Mount `json:"extra_mounts,omitempty"`
+	// EmbedDNS marks compose services on CNI with -dns auto that use internal-only networks,
+	// so the embedded resolver registers their hostnames. Ignored for native and for -dns embedded.
+	EmbedDNS bool `json:"embed_dns,omitempty"`
 }
 
 // containerEntry tracks runtime state for a supervised container.
@@ -89,6 +93,11 @@ type Supervisor struct {
 	log      *slog.Logger
 	baseDir  string // /var/lib/nyxd
 
+	dns        netdns.Backend
+	netDriver  string
+	dnsMode    string
+	dnsGateway string
+
 	mu         sync.RWMutex
 	containers map[string]*containerEntry
 	wg         sync.WaitGroup
@@ -99,16 +108,26 @@ type Supervisor struct {
 // logColl may be nil (stdio is discarded and no log files are written).
 // imgStore may be nil; when set, the supervisor can re-adopt running crun containers
 // after restart using bundle nyxd-meta.json when supervisor JSON is missing.
-func New(rt *runtime.Runtime, ovl *overlay.Manager, net network.Backend, baseDir string, log *slog.Logger, logColl *logs.Collector, imgStore *image.Store) *Supervisor {
+// dns selects optional embedded DNS; pass nil for [netdns.Noop]. netDriver and dnsMode
+// mirror nyxd -net-driver and -dns (used for compose EmbedDNS and registration policy).
+// dnsGateway is the IPv4 bridge address written into resolv.conf (e.g. 10.88.0.1).
+func New(rt *runtime.Runtime, ovl *overlay.Manager, net network.Backend, baseDir string, log *slog.Logger, logColl *logs.Collector, imgStore *image.Store, dns netdns.Backend, netDriver, dnsMode, dnsGateway string) *Supervisor {
+	if dns == nil {
+		dns = netdns.Noop{}
+	}
 	s := &Supervisor{
-		rt:         rt,
-		ovl:        ovl,
-		net:        net,
-		imgStore:   imgStore,
-		logColl:    logColl,
-		log:        log,
-		baseDir:    baseDir,
-		containers: make(map[string]*containerEntry),
+		rt:          rt,
+		ovl:         ovl,
+		net:         net,
+		imgStore:    imgStore,
+		logColl:     logColl,
+		log:         log,
+		baseDir:     baseDir,
+		dns:         dns,
+		netDriver:   strings.ToLower(strings.TrimSpace(netDriver)),
+		dnsMode:     strings.ToLower(strings.TrimSpace(dnsMode)),
+		dnsGateway:  strings.TrimSpace(dnsGateway),
+		containers:  make(map[string]*containerEntry),
 	}
 	s.reconcilePersisted()
 	s.reconcileCrunOrphans()
@@ -501,7 +520,8 @@ func (s *Supervisor) Shutdown(ctx context.Context) {
 		}(id)
 	}
 	wg.Wait()
-	s.wg.Wait()
+	s.	wg.Wait()
+	s.dns.Shutdown()
 }
 
 func readinessWaitContext(parent context.Context, cfg *health.Config) (context.Context, context.CancelFunc) {
@@ -618,19 +638,31 @@ func (s *Supervisor) startOnce(ctx context.Context, e *containerEntry) (fastExit
 
 	// 3. Generate OCI bundle.
 	bundleDir := fmt.Sprintf("%s/bundles/%s", s.baseDir, spec.ID)
+	if err := os.MkdirAll(bundleDir, 0o700); err != nil {
+		s.teardownNetwork(ctx, spec.ID)
+		s.ovl.Remove(spec.ID) //nolint:errcheck
+		return false, fmt.Errorf("bundle dir: %w", err)
+	}
+	resolvPath, err := s.writeBundleResolv(bundleDir, spec)
+	if err != nil {
+		s.teardownNetwork(ctx, spec.ID)
+		s.ovl.Remove(spec.ID) //nolint:errcheck
+		return false, fmt.Errorf("bundle resolv: %w", err)
+	}
 	_, err = bundle.Generate(bundleDir, bundle.Options{
-		ContainerID: spec.ID,
-		RootFS:      rootFS,
-		NetNS:       nsPath,
-		ImageConfig: spec.ImageConfig,
-		Env:         spec.Env,
-		Args:        spec.Args,
-		WorkDir:     spec.WorkDir,
-		User:        spec.User,
-		Resources:   spec.Resources,
-		ReadOnly:    spec.ReadOnly,
-		Hostname:    spec.Hostname,
-		ExtraMounts: spec.ExtraMounts,
+		ContainerID:    spec.ID,
+		RootFS:         rootFS,
+		NetNS:          nsPath,
+		ImageConfig:    spec.ImageConfig,
+		Env:            spec.Env,
+		Args:           spec.Args,
+		WorkDir:        spec.WorkDir,
+		User:           spec.User,
+		Resources:      spec.Resources,
+		ReadOnly:       spec.ReadOnly,
+		Hostname:       spec.Hostname,
+		ExtraMounts:    spec.ExtraMounts,
+		ResolvConfPath: resolvPath,
 	})
 	if err != nil {
 		s.teardownNetwork(ctx, spec.ID)
@@ -728,6 +760,7 @@ func (s *Supervisor) startOnce(ctx context.Context, e *containerEntry) (fastExit
 			st, err2 := s.rt.State(ctx, spec.ID)
 			if err2 == nil && st != nil && st.Status == "running" {
 				log.Info("container started", "image", spec.Image, "ip", ip)
+				s.registerEmbeddedDNS(spec, ip)
 				if err := s.persistContainerEntry(e); err != nil {
 					log.Warn("persist supervisor state", "err", err)
 				}
@@ -878,6 +911,12 @@ func (s *Supervisor) shouldRestart(e *containerEntry, exitCode int) bool {
 
 func (s *Supervisor) teardownNetwork(ctx context.Context, id string) {
 	nsPath := fmt.Sprintf("/run/nyxd/netns/%s", id)
+	s.mu.RLock()
+	entry, ok := s.containers[id]
+	s.mu.RUnlock()
+	if ok {
+		s.dnsDeregisterForSpec(entry.spec)
+	}
 	if err := s.net.Teardown(ctx, id, nsPath); err != nil {
 		s.log.Warn("network teardown", "id", id, "err", err)
 	}
@@ -893,6 +932,7 @@ func (s *Supervisor) cleanup(e *containerEntry) {
 		s.logColl.Remove(e.spec.ID)
 	}
 	if e.netNS != "" {
+		s.dnsDeregisterForSpec(e.spec)
 		s.net.Teardown(context.Background(), e.spec.ID, e.netNS) //nolint:errcheck
 		network.DeleteNetNS(e.spec.ID)                           //nolint:errcheck
 	}

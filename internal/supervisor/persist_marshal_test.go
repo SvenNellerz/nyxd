@@ -18,6 +18,7 @@ func TestContainerSpecJSONRoundTrip(t *testing.T) {
 				ExposedPorts: map[string]struct{}{"80/tcp": {}},
 			},
 		},
+		EmbedDNS: true,
 	}
 	rec := containerPersistRecord{Version: supervisorPersistVersion, Spec: spec}
 	data, err := json.Marshal(rec)
@@ -30,5 +31,8 @@ func TestContainerSpecJSONRoundTrip(t *testing.T) {
 	}
 	if out.Spec.Image != spec.Image {
 		t.Fatalf("image mismatch")
+	}
+	if !out.Spec.EmbedDNS {
+		t.Fatalf("embed_dns mismatch")
 	}
 }

@@ -124,6 +124,8 @@ type Options struct {
 	Resources   *Resources
 	ReadOnly    bool
 	Hostname    string
+	// ResolvConfPath, when set, is an absolute host path to a file bind-mounted read-only at /etc/resolv.conf.
+	ResolvConfPath string
 	// ExtraMounts are appended after default runtime mounts (binds, named volumes, etc.).
 	ExtraMounts []Mount
 }
@@ -204,7 +206,7 @@ func buildSpec(opts Options) Spec {
 				{Type: "RLIMIT_NPROC", Hard: 512, Soft: 512},
 			},
 		},
-		Mounts: appendMounts(defaultMounts(), opts.ExtraMounts),
+		Mounts: appendMounts(resolvThenDefault(opts.ResolvConfPath), opts.ExtraMounts),
 		Linux: &Linux{
 			Namespaces:        namespaces,
 			Resources:         opts.Resources,
@@ -239,6 +241,23 @@ func defaultMounts() []Mount {
 		{Destination: "/sys/fs/cgroup", Type: "cgroup", Source: "cgroup", Options: []string{"nosuid", "noexec", "nodev", "relatime", "ro"}},
 		{Destination: "/run", Type: "tmpfs", Source: "tmpfs", Options: []string{"nosuid", "strictatime", "mode=755", "size=65536k"}},
 	}
+}
+
+func resolvThenDefault(resolvHost string) []Mount {
+	base := defaultMounts()
+	if strings.TrimSpace(resolvHost) == "" {
+		return base
+	}
+	resolv := Mount{
+		Type:        "bind",
+		Source:      resolvHost,
+		Destination: "/etc/resolv.conf",
+		Options:     []string{"rbind", "ro", "nosuid", "nodev"},
+	}
+	out := make([]Mount, 0, len(base)+1)
+	out = append(out, resolv)
+	out = append(out, base...)
+	return out
 }
 
 func appendMounts(base, extra []Mount) []Mount {

@@ -25,7 +25,10 @@ type UpMeta struct {
 // BuildContainerSpecs resolves images (pull when missing), maps each service in
 // dependency order to a [supervisor.ContainerSpec], and returns the slice suitable
 // for [supervisor.Supervisor.StartSequential].
-func BuildContainerSpecs(ctx context.Context, stack *Stack, meta UpMeta, store *image.Store) ([]supervisor.ContainerSpec, error) {
+//
+// netDriver and dnsMode mirror nyxd flags (-net-driver, -dns): when both are cni+auto,
+// EmbedDNS is set per service for internal-only compose networks (see ServiceUsesOnlyInternalNetworks).
+func BuildContainerSpecs(ctx context.Context, stack *Stack, meta UpMeta, store *image.Store, netDriver, dnsMode string) ([]supervisor.ContainerSpec, error) {
 	if store == nil {
 		return nil, fmt.Errorf("image store is required")
 	}
@@ -81,6 +84,20 @@ func BuildContainerSpecs(ctx context.Context, stack *Stack, meta UpMeta, store *
 			return nil, fmt.Errorf("service %q user: %w", name, err)
 		}
 
+		embedDNS := false
+		nd := strings.ToLower(strings.TrimSpace(netDriver))
+		dm := strings.ToLower(strings.TrimSpace(dnsMode))
+		if dm == "" {
+			dm = "auto"
+		}
+		if nd == "cni" && (dm == "auto" || dm == "embedded") {
+			if dm == "embedded" {
+				embedDNS = true
+			} else {
+				embedDNS = ServiceUsesOnlyInternalNetworks(stack, svc)
+			}
+		}
+
 		spec := supervisor.ContainerSpec{
 			ID:             composeContainerID(meta.Project, name),
 			Image:          img,
@@ -97,6 +114,7 @@ func BuildContainerSpecs(ctx context.Context, stack *Stack, meta UpMeta, store *
 			StopTimeout:    time.Duration(svc.StopTimeout.Duration),
 			Healthcheck:    hc,
 			ExtraMounts:    mounts,
+			EmbedDNS:       embedDNS,
 		}
 		out = append(out, spec)
 	}

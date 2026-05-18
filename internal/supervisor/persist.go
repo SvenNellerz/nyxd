@@ -164,6 +164,7 @@ func (s *Supervisor) reconcilePersisted() {
 
 		s.log.Info("re-adopted supervised container from disk", "id", id, "image", rec.Spec.Image, "ip", rec.IP)
 		s.startHealthMonitor(context.Background(), entry)
+		s.registerEmbeddedDNS(rec.Spec, rec.IP)
 		s.wg.Add(1)
 		// Daemon-lifetime context: reconcile's short-lived ctx must not cancel supervision.
 		go s.supervise(context.Background(), entry)
@@ -251,6 +252,7 @@ func (s *Supervisor) reconcileCrunOrphans() {
 			RestartPolicy:  restartPolicyFromString(meta.Restart),
 			ReadOnly:       false,
 			PortMappings:   portMaps,
+			EmbedDNS:       false,
 		}
 
 		ip := strings.TrimSpace(meta.IP)
@@ -274,6 +276,7 @@ func (s *Supervisor) reconcileCrunOrphans() {
 		if err := s.persistContainerEntry(entry); err != nil {
 			s.log.Warn("crun orphan reconcile: persist", "id", id, "err", err)
 		}
+		s.registerEmbeddedDNS(entry.spec, ip)
 		s.wg.Add(1)
 		go s.supervise(context.Background(), entry)
 	}

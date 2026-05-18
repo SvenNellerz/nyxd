@@ -6,6 +6,19 @@ This document describes how the daemon picks a network implementation, how that 
 
 **Only `nyxd` (the daemon)** selects the network backend via CLI flags. The **`nyx` client** does not set `-net-driver`; it talks to the control socket. After you change networking flags, **rebuild and restart `nyxd`** so the new binary and options are in effect.
 
+## DNS (`-dns`)
+
+nyxd can run a small **embedded DNS** server on the bridge gateway (UDP port 53, default `NYXD_GATEWAY_IP` / `10.88.0.1`) that answers **A** records for container hostnames (`<hostname>` and `<hostname>.nyxd.local`). Containers receive a bind-mounted `/etc/resolv.conf` pointing at that gateway when registration applies.
+
+| `-dns` value | Behaviour |
+|--------------|-------------|
+| **`auto`** (default) | **Native** (`-net-driver=native`): embedded DNS for every supervised container. **CNI**: embedded DNS only for **Compose** stacks where each service is attached solely to networks declared with `internal: true` (see compose `networks:`). |
+| **`embedded`** | Always use embedded DNS (including all services on CNI). |
+| **`cni`** | Do not run embedded DNS; use CNI-side DNS (for example the **`dnsname`** plugin in your conflist). |
+| **`off`** | No embedded DNS and no `/etc/resolv.conf` override from nyxd. |
+
+Set **`NYXD_GATEWAY_IP`** (and **`NYXD_CONTAINER_SUBNET`**) to match the bridge your CNI plugin uses if it differs from the native defaults.
+
 ## Default: native (no `/opt/cni/bin`)
 
 By default, `nyxd` runs with:
@@ -79,7 +92,7 @@ Both satisfy `network.Backend` (see compile-time assertions in `native/manager.g
 
 ### Supervisor
 
-`internal/supervisor` holds a `network.Backend`, not a concrete `*network.Manager`. `supervisor.New(rt, ovl, net, baseDir, log, logColl, imgStore)` accepts whichever backend `cmd/nyxd` constructed (and an optional image store for post-restart re-adoption).
+`internal/supervisor` holds a `network.Backend`, not a concrete `*network.Manager`. `supervisor.New(...)` also receives the selected DNS backend and `-dns` / `-net-driver` policy for compose stack registration; see **DNS (`-dns`)** above.
 
 ### `network.PortMapping`
 

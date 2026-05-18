@@ -17,6 +17,7 @@ import (
 	"github.com/zrougamed/nyxd/internal/daemonlock"
 	"github.com/zrougamed/nyxd/internal/image"
 	"github.com/zrougamed/nyxd/internal/logs"
+	"github.com/zrougamed/nyxd/internal/netdns"
 	"github.com/zrougamed/nyxd/internal/network"
 	"github.com/zrougamed/nyxd/internal/network/native"
 	"github.com/zrougamed/nyxd/internal/overlay"
@@ -44,6 +45,7 @@ type Config struct {
 	Socket       string // Unix socket for HTTP control API; empty disables
 	SocketGroup  string // optional POSIX group for socket (0660); lets non-root users in that group run nyx
 	PullPlatform string // OCI platform for multi-arch indexes, e.g. linux/arm64; empty uses GOOS/GOARCH
+	DNS          string // auto (default), embedded, cni, off — see docs/networking.md
 }
 
 func main() {
@@ -116,9 +118,11 @@ func run(ctx context.Context, cfg Config, logger *slog.Logger) error {
 		return fmt.Errorf("log collector: %w", err)
 	}
 
-	sup := supervisor.New(rt, ovl, net, cfg.BaseDir, logger, logColl, imgStore)
+	gw := netdns.DefaultGateway()
+	dns := netdns.NewBackend(cfg.DNS, driver, logger, gw)
+	sup := supervisor.New(rt, ovl, net, cfg.BaseDir, logger, logColl, imgStore, dns, driver, cfg.DNS, gw.String())
 
-	ctl := control.New(logger, rt, imgStore, sup, ctx, nil, version, gitCommit, buildDate, cfg.BaseDir, cfg.Socket, cfg.SocketGroup)
+	ctl := control.New(logger, rt, imgStore, sup, ctx, nil, version, gitCommit, buildDate, cfg.BaseDir, cfg.Socket, cfg.SocketGroup, driver, cfg.DNS)
 	if err := ctl.Start(); err != nil {
 		logger.Warn("control API not started", "err", err)
 	} else {
@@ -155,6 +159,7 @@ func parseFlags() Config {
 	flag.StringVar(&cfg.Socket, "socket", "/run/nyxd/nyxd.sock", "Unix socket for HTTP control API (nyx client); set to \"\" to disable")
 	flag.StringVar(&cfg.SocketGroup, "socket-group", "", "POSIX group name for the socket (mode 0660, chown root:group); add users to this group so nyx works without sudo")
 	flag.StringVar(&cfg.PullPlatform, "pull-platform", "", "OCI platform for multi-arch manifests (e.g. linux/arm64); default uses this binary's GOOS/GOARCH")
+	flag.StringVar(&cfg.DNS, "dns", "auto", "DNS: auto (embedded; on CNI only for compose internal networks), embedded, cni (no embedded), off")
 	flag.BoolVar(&cfg.Version, "version", false, "Print version and exit")
 	flag.Parse()
 	return cfg

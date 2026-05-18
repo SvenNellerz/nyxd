@@ -54,6 +54,9 @@ type Server struct {
 	socket      string
 	socketGroup string // optional: chgrp socket for non-root nyx clients (0660)
 
+	netDriver string
+	dnsMode   string
+
 	srv    *http.Server
 	ln     net.Listener
 	execMu sync.Mutex
@@ -65,7 +68,8 @@ type Server struct {
 // dataDir is the daemon base directory (logs live under dataDir/logs).
 // socketGroup is optional (e.g. "nyxd"); when set, the socket is chown root:group and mode 0660
 // so members of that POSIX group can connect without sudo.
-func New(log *slog.Logger, rt *runtime.Runtime, store *image.Store, sup *supervisor.Supervisor, baseCtx context.Context, lister Lister, version, commit, date, dataDir, socket, socketGroup string) *Server {
+// netDriver and dnsMode mirror nyxd -net-driver and -dns for compose stack DNS policy.
+func New(log *slog.Logger, rt *runtime.Runtime, store *image.Store, sup *supervisor.Supervisor, baseCtx context.Context, lister Lister, version, commit, date, dataDir, socket, socketGroup, netDriver, dnsMode string) *Server {
 	l := lister
 	if l == nil && sup != nil {
 		l = sup
@@ -75,6 +79,8 @@ func New(log *slog.Logger, rt *runtime.Runtime, store *image.Store, sup *supervi
 		version: version, gitCommit: commit, buildDate: date,
 		socket:      socket,
 		socketGroup: strings.TrimSpace(socketGroup),
+		netDriver:   strings.TrimSpace(netDriver),
+		dnsMode:     strings.TrimSpace(dnsMode),
 	}
 }
 
@@ -552,7 +558,7 @@ func (s *Server) handleComposeUp(w http.ResponseWriter, r *http.Request) {
 		ComposeDir: composeDir,
 		Project:    project,
 		DataDir:    s.dataDir,
-	}, s.store)
+	}, s.store, s.netDriver, s.dnsMode)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
