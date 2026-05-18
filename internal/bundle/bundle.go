@@ -72,11 +72,21 @@ type Caps struct {
 }
 
 type Linux struct {
-	Namespaces        []Namespace `json:"namespaces"`
-	Resources         *Resources  `json:"resources,omitempty"`
-	RootfsPropagation string      `json:"rootfsPropagation,omitempty"`
-	MaskedPaths       []string    `json:"maskedPaths,omitempty"`
-	ReadonlyPaths     []string    `json:"readonlyPaths,omitempty"`
+	Namespaces        []Namespace       `json:"namespaces"`
+	Resources         *Resources        `json:"resources,omitempty"`
+	Seccomp           *Seccomp          `json:"seccomp,omitempty"`
+	RootfsPropagation string            `json:"rootfsPropagation,omitempty"`
+	MaskedPaths       []string          `json:"maskedPaths,omitempty"`
+	ReadonlyPaths     []string          `json:"readonlyPaths,omitempty"`
+	UIDMappings       []LinuxIDMapping  `json:"uidMappings,omitempty"`
+	GIDMappings       []LinuxIDMapping  `json:"gidMappings,omitempty"`
+}
+
+// LinuxIDMapping is one uid/gid map entry (OCI linux.uidMappings / gidMappings).
+type LinuxIDMapping struct {
+	ContainerID uint32 `json:"containerID"`
+	HostID      uint32 `json:"hostID"`
+	Size        uint32 `json:"size"`
 }
 
 type Namespace struct {
@@ -85,20 +95,30 @@ type Namespace struct {
 }
 
 type Resources struct {
-	Memory *MemoryRes `json:"memory,omitempty"`
-	CPU    *CPURes    `json:"cpu,omitempty"`
-	Pids   *PidsRes   `json:"pids,omitempty"`
+	Memory  *MemoryRes   `json:"memory,omitempty"`
+	CPU     *CPURes      `json:"cpu,omitempty"`
+	Pids    *PidsRes     `json:"pids,omitempty"`
+	BlockIO *BlockIORes  `json:"blockIO,omitempty"`
 }
 
 type MemoryRes struct {
-	Limit int64 `json:"limit,omitempty"`
-	Swap  int64 `json:"swap,omitempty"`
+	Limit          int64  `json:"limit,omitempty"`
+	Swap           int64  `json:"swap,omitempty"`
+	Reservation    int64  `json:"reservation,omitempty"`
+	OomKillDisable *bool  `json:"disableOOMKiller,omitempty"`
+	OomScoreAdj    *int   `json:"oomScoreAdj,omitempty"`
 }
 
 type CPURes struct {
 	Shares uint64 `json:"shares,omitempty"`
 	Quota  int64  `json:"quota,omitempty"`
 	Period uint64 `json:"period,omitempty"`
+	Cpus   string `json:"cpus,omitempty"`
+	Mems   string `json:"mems,omitempty"`
+}
+
+type BlockIORes struct {
+	Weight uint16 `json:"weight,omitempty"`
 }
 
 type PidsRes struct {
@@ -128,6 +148,18 @@ type Options struct {
 	ResolvConfPath string
 	// ExtraMounts are appended after default runtime mounts (binds, named volumes, etc.).
 	ExtraMounts []Mount
+
+	// SeccompProfile: empty or "default" = built-in deny-list profile; "unconfined" = omit seccomp;
+	// otherwise absolute path to a JSON fragment matching OCI linux.seccomp.
+	SeccompProfile string
+	CapAdd         []string
+	CapDrop        []string
+	Privileged     bool
+	// NoNewPrivileges defaults to true when nil; ignored (forced false) when Privileged.
+	NoNewPrivileges *bool
+	// UIDMappings/GIDMappings enable user namespaces when non-empty (crun + newuidmap).
+	UIDMappings []LinuxIDMapping
+	GIDMappings []LinuxIDMapping
 }
 
 // Generate writes an OCI bundle config.json to bundleDir and returns the dir path.
@@ -136,7 +168,11 @@ func Generate(bundleDir string, opts Options) (string, error) {
 		return "", fmt.Errorf("bundle dir: %w", err)
 	}
 
-	spec := buildSpec(opts)
+	sec, err := resolveSeccomp(opts)
+	if err != nil {
+		return "", fmt.Errorf("seccomp: %w", err)
+	}
+	spec := buildSpec(opts, sec)
 	data, err := json.MarshalIndent(spec, "", "  ")
 	if err != nil {
 		return "", err
@@ -149,7 +185,7 @@ func Generate(bundleDir string, opts Options) (string, error) {
 	return bundleDir, nil
 }
 
-func buildSpec(opts Options) Spec {
+func buildSpec(opts Options, sec *Seccomp) Spec {
 	imgCfg := opts.ImageConfig
 
 	args := opts.Args
@@ -183,10 +219,42 @@ func buildSpec(opts Options) Spec {
 		{Type: "ipc"},
 		{Type: "uts"},
 	}
+	if len(opts.UIDMappings) > 0 {
+		namespaces = append([]Namespace{{Type: "user"}}, namespaces...)
+	}
 	if opts.NetNS != "" {
 		namespaces = append(namespaces, Namespace{Type: "network", Path: opts.NetNS})
 	} else {
 		namespaces = append(namespaces, Namespace{Type: "network"})
+	}
+
+	var capz *Caps
+	noNewPriv := true
+	if opts.Privileged {
+		capz = allCaps()
+		noNewPriv = false
+		sec = nil
+	} else {
+		capz = mergeCapabilities(minimalCapNames(), opts.CapAdd, opts.CapDrop)
+		if opts.NoNewPrivileges != nil {
+			noNewPriv = *opts.NoNewPrivileges
+		}
+	}
+
+	linux := &Linux{
+		Namespaces:        namespaces,
+		Resources:         opts.Resources,
+		Seccomp:           sec,
+		RootfsPropagation: "rprivate",
+		UIDMappings:       opts.UIDMappings,
+		GIDMappings:       opts.GIDMappings,
+	}
+	if opts.Privileged {
+		linux.MaskedPaths = nil
+		linux.ReadonlyPaths = nil
+	} else {
+		linux.MaskedPaths = maskedPaths()
+		linux.ReadonlyPaths = readonlyPaths()
 	}
 
 	return Spec{
@@ -199,34 +267,15 @@ func buildSpec(opts Options) Spec {
 			Args:            args,
 			Env:             env,
 			Cwd:             cwd,
-			NoNewPrivileges: true,
-			Capabilities:    minimalCaps(),
+			NoNewPrivileges: noNewPriv,
+			Capabilities:    capz,
 			Rlimits: []Rlimit{
 				{Type: "RLIMIT_NOFILE", Hard: 1024, Soft: 1024},
 				{Type: "RLIMIT_NPROC", Hard: 512, Soft: 512},
 			},
 		},
 		Mounts: appendMounts(resolvThenDefault(opts.ResolvConfPath), opts.ExtraMounts),
-		Linux: &Linux{
-			Namespaces:        namespaces,
-			Resources:         opts.Resources,
-			RootfsPropagation: "rprivate",
-			MaskedPaths:       maskedPaths(),
-			ReadonlyPaths:     readonlyPaths(),
-		},
-	}
-}
-
-func minimalCaps() *Caps {
-	caps := []string{
-		"CAP_CHOWN", "CAP_DAC_OVERRIDE", "CAP_FSETID", "CAP_FOWNER",
-		"CAP_MKNOD", "CAP_NET_RAW", "CAP_SETGID", "CAP_SETUID",
-		"CAP_SETFCAP", "CAP_SETPCAP", "CAP_NET_BIND_SERVICE",
-		"CAP_SYS_CHROOT", "CAP_KILL", "CAP_AUDIT_WRITE",
-	}
-	return &Caps{
-		Bounding: caps, Effective: caps, Permitted: caps,
-		Inheritable: []string{}, Ambient: []string{},
+		Linux:  linux,
 	}
 }
 

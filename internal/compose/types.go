@@ -67,7 +67,8 @@ type Service struct {
 	CapAdd  []string `yaml:"cap_add"`
 	CapDrop []string `yaml:"cap_drop"`
 
-	// Seccomp profile path. Empty = runtime default.
+	// SeccompProfile: empty or "default" = built-in profile; "unconfined" disables seccomp;
+	// otherwise path to JSON (absolute or relative to the compose file directory).
 	SeccompProfile string `yaml:"seccomp_profile"`
 
 	// NoNewPrivileges sets no-new-privs in OCI spec.
@@ -111,10 +112,18 @@ type Resources struct {
 
 // ResourceSpec is a single limit/reservation set.
 type ResourceSpec struct {
-	// CPUs: "0.5" = 50% of one core
+	// CPUs: "0.5" = 50% of one core (maps to cgroup v2 cpu.max quota/period).
 	CPUs string `yaml:"cpus"`
 	// Memory: "128m", "1g"
 	Memory string `yaml:"memory"`
+	// PidsLimit caps the number of tasks in the cgroup (maps to pids.max).
+	PidsLimit *int `yaml:"pids_limit,omitempty"`
+	// OomKillDisable maps to memory.oom_control (OCI disableOOMKiller).
+	OomKillDisable *bool `yaml:"oom_kill_disable,omitempty"`
+	OomScoreAdj    *int  `yaml:"oom_score_adj,omitempty"`
+	CpusetCpus     string `yaml:"cpuset_cpus,omitempty"`
+	CpusetMems     string `yaml:"cpuset_mems,omitempty"`
+	BlkioWeight    *int   `yaml:"blkio_weight,omitempty"`
 }
 
 // Network describes a CNI-backed network.

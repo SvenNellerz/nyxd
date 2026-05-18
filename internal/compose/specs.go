@@ -98,23 +98,34 @@ func BuildContainerSpecs(ctx context.Context, stack *Stack, meta UpMeta, store *
 			}
 		}
 
+		res, err := BundleResourcesFromDeploy(svc.Deploy)
+		if err != nil {
+			return nil, fmt.Errorf("service %q resources: %w", name, err)
+		}
+
 		spec := supervisor.ContainerSpec{
-			ID:             composeContainerID(meta.Project, name),
-			Image:          img,
-			ImageConfig:    cfg,
-			ManifestLayers: m.Layers,
-			BlobPaths:      paths,
-			Env:            EnvMapToSlice(svc.Environment),
-			Args:           composeArgs(&svc, cfg),
-			User:           u,
-			PortMappings:   portMaps,
-			ReadOnly:       svc.ReadOnly,
-			Hostname:       strings.TrimSpace(name),
-			RestartPolicy:  composeRestartPolicy(svc.Restart),
-			StopTimeout:    time.Duration(svc.StopTimeout.Duration),
-			Healthcheck:    hc,
-			ExtraMounts:    mounts,
-			EmbedDNS:       embedDNS,
+			ID:               composeContainerID(meta.Project, name),
+			Image:            img,
+			ImageConfig:      cfg,
+			ManifestLayers:   m.Layers,
+			BlobPaths:        paths,
+			Env:              EnvMapToSlice(svc.Environment),
+			Args:             composeArgs(&svc, cfg),
+			User:             u,
+			PortMappings:     portMaps,
+			ReadOnly:         svc.ReadOnly,
+			Hostname:         strings.TrimSpace(name),
+			RestartPolicy:    composeRestartPolicy(svc.Restart),
+			StopTimeout:      time.Duration(svc.StopTimeout.Duration),
+			Healthcheck:      hc,
+			ExtraMounts:      mounts,
+			EmbedDNS:         embedDNS,
+			Resources:        res,
+			Privileged:       svc.Privileged,
+			SeccompProfile:   ResolveSeccompProfilePath(meta.ComposeDir, svc.SeccompProfile),
+			CapAdd:           append([]string(nil), svc.CapAdd...),
+			CapDrop:          append([]string(nil), svc.CapDrop...),
+			NoNewPrivileges:  svc.NoNewPrivileges,
 		}
 		out = append(out, spec)
 	}

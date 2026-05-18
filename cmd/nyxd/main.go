@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/zrougamed/nyxd/internal/cgroup"
 	"github.com/zrougamed/nyxd/internal/control"
 	"github.com/zrougamed/nyxd/internal/daemonlock"
 	"github.com/zrougamed/nyxd/internal/image"
@@ -80,6 +81,10 @@ func run(ctx context.Context, cfg Config, logger *slog.Logger) error {
 		return err
 	}
 	defer dlock.Close()
+
+	if err := cgroup.CheckUnifiedV2(); err != nil {
+		return fmt.Errorf("cgroup: %w", err)
+	}
 
 	imgStore, err := image.NewStore(cfg.BaseDir + "/images")
 	if err != nil {

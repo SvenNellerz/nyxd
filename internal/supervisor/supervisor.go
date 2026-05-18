@@ -67,6 +67,14 @@ type ContainerSpec struct {
 	// EmbedDNS marks compose services on CNI with -dns auto that use internal-only networks,
 	// so the embedded resolver registers their hostnames. Ignored for native and for -dns embedded.
 	EmbedDNS bool `json:"embed_dns,omitempty"`
+
+	Privileged       bool                   `json:"privileged,omitempty"`
+	SeccompProfile   string                 `json:"seccomp_profile,omitempty"`
+	CapAdd           []string               `json:"cap_add,omitempty"`
+	CapDrop          []string               `json:"cap_drop,omitempty"`
+	NoNewPrivileges  *bool                  `json:"no_new_privileges,omitempty"`
+	UIDMappings      []bundle.LinuxIDMapping `json:"uid_mappings,omitempty"`
+	GIDMappings      []bundle.LinuxIDMapping `json:"gid_mappings,omitempty"`
 }
 
 // containerEntry tracks runtime state for a supervised container.
@@ -650,19 +658,26 @@ func (s *Supervisor) startOnce(ctx context.Context, e *containerEntry) (fastExit
 		return false, fmt.Errorf("bundle resolv: %w", err)
 	}
 	_, err = bundle.Generate(bundleDir, bundle.Options{
-		ContainerID:    spec.ID,
-		RootFS:         rootFS,
-		NetNS:          nsPath,
-		ImageConfig:    spec.ImageConfig,
-		Env:            spec.Env,
-		Args:           spec.Args,
-		WorkDir:        spec.WorkDir,
-		User:           spec.User,
-		Resources:      spec.Resources,
-		ReadOnly:       spec.ReadOnly,
-		Hostname:       spec.Hostname,
-		ExtraMounts:    spec.ExtraMounts,
-		ResolvConfPath: resolvPath,
+		ContainerID:     spec.ID,
+		RootFS:          rootFS,
+		NetNS:           nsPath,
+		ImageConfig:     spec.ImageConfig,
+		Env:             spec.Env,
+		Args:            spec.Args,
+		WorkDir:         spec.WorkDir,
+		User:            spec.User,
+		Resources:       spec.Resources,
+		ReadOnly:        spec.ReadOnly,
+		Hostname:        spec.Hostname,
+		ExtraMounts:     spec.ExtraMounts,
+		ResolvConfPath:  resolvPath,
+		SeccompProfile:  spec.SeccompProfile,
+		CapAdd:          spec.CapAdd,
+		CapDrop:         spec.CapDrop,
+		Privileged:      spec.Privileged,
+		NoNewPrivileges: spec.NoNewPrivileges,
+		UIDMappings:     spec.UIDMappings,
+		GIDMappings:     spec.GIDMappings,
 	})
 	if err != nil {
 		s.teardownNetwork(ctx, spec.ID)
