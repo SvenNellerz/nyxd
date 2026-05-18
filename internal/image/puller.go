@@ -3,6 +3,7 @@
 package image
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
@@ -723,7 +724,7 @@ func (c *registryClient) manifest(ctx context.Context, ref string) (*oci.Manifes
 	if strings.Contains(ct, "index") || strings.Contains(ct, "manifest.list") {
 		var idx oci.Index
 		if err := json.Unmarshal(body, &idx); err != nil {
-			return nil, err
+			return nil, manifestJSONDecodeError(ref, ct, body, err)
 		}
 		d, err := pickIndexDigest(idx.Manifests, c.wantOS, c.wantArch)
 		if err != nil {
@@ -733,7 +734,21 @@ func (c *registryClient) manifest(ctx context.Context, ref string) (*oci.Manifes
 	}
 
 	var m oci.Manifest
-	return &m, json.Unmarshal(body, &m)
+	if err := json.Unmarshal(body, &m); err != nil {
+		return nil, manifestJSONDecodeError(ref, ct, body, err)
+	}
+	return &m, nil
+}
+
+func manifestJSONDecodeError(ref, contentType string, body []byte, err error) error {
+	b := bytes.TrimSpace(body)
+	if len(b) > 0 && b[0] == '<' {
+		return fmt.Errorf("registry manifest %s: body was HTML/XML (proxy, captive portal, TLS inspection, or wrong host), not JSON: %w", ref, err)
+	}
+	if len(b) == 0 {
+		return fmt.Errorf("registry manifest %s: empty body (%w)", ref, err)
+	}
+	return fmt.Errorf("registry manifest %s (content-type %q): %w", ref, contentType, err)
 }
 
 func pickIndexDigest(manifests []oci.Descriptor, wantOS, wantArch string) (string, error) {

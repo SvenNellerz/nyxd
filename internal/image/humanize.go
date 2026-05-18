@@ -34,8 +34,31 @@ func HumanizePullError(err error) string {
 		return "registry denied access (private image or missing credentials?)."
 	case strings.Contains(s, "404") || strings.Contains(s, "manifest unknown") || strings.Contains(s, "not found"):
 		return "image or tag was not found on the registry."
+	case strings.Contains(s, "HTML/XML") || strings.Contains(s, "non-JSON response") || strings.Contains(s, "HTML instead of"):
+		// Emitted by the puller when the registry path returns a web page.
+		return "registry returned a web page instead of image metadata (proxy, captive portal, TLS inspection, or DNS pointing at the wrong host). Check network/VPN and try: nyx pull <image>"
+	case strings.Contains(s, "invalid character") && strings.Contains(s, "looking for beginning of value"):
+		// Typical when the body starts with '<' (HTML) but was still parsed as JSON.
+		return "registry returned non-JSON (often HTML) instead of a manifest — usually a proxy, captive portal, or broken path to the registry. Check connectivity/DNS and try: nyx pull <image>"
 	}
 	return trimErrLine(s, 420)
+}
+
+// HumanizeComposeBuildError maps errors from compose.BuildContainerSpecs (pull, parse, …)
+// to short CLI/API text. Pull-related chains use [HumanizePullError]; others use [TrimUserMessage].
+func HumanizeComposeBuildError(err error) string {
+	if err == nil {
+		return ""
+	}
+	s := err.Error()
+	// compose.BuildContainerSpecs wraps pulls as: service "name" pull "ref": …
+	if strings.Contains(s, ` pull "`) || strings.Contains(s, "pull manifest") ||
+		strings.Contains(s, "pull auth") || strings.Contains(s, "pull config") ||
+		strings.Contains(s, "pull layers") || strings.Contains(s, "decode manifest") ||
+		strings.Contains(s, "registry manifest") {
+		return HumanizePullError(err)
+	}
+	return TrimUserMessage(err)
 }
 
 // TrimUserMessage collapses whitespace and caps length for errors shown to API clients

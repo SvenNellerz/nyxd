@@ -546,12 +546,12 @@ func (s *Server) handleComposeUp(w http.ResponseWriter, r *http.Request) {
 	}
 	var body composeProjectRequest
 	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&body); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		http.Error(w, image.TrimUserMessage(err), http.StatusBadRequest)
 		return
 	}
 	st, composeDir, project, err := s.loadComposeProject(body)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		http.Error(w, image.HumanizeComposeBuildError(err), http.StatusBadRequest)
 		return
 	}
 	specs, err := compose.BuildContainerSpecs(baseCtx, st, compose.UpMeta{
@@ -560,7 +560,7 @@ func (s *Server) handleComposeUp(w http.ResponseWriter, r *http.Request) {
 		DataDir:    s.dataDir,
 	}, s.store, s.netDriver, s.dnsMode)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		http.Error(w, image.HumanizeComposeBuildError(err), http.StatusBadRequest)
 		return
 	}
 	if err := s.sup.StartSequential(baseCtx, specs); err != nil {
@@ -587,12 +587,12 @@ func (s *Server) handleComposeStop(w http.ResponseWriter, r *http.Request) {
 	}
 	var body composeProjectRequest
 	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&body); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		http.Error(w, image.TrimUserMessage(err), http.StatusBadRequest)
 		return
 	}
 	st, _, project, err := s.loadComposeProject(body)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		http.Error(w, image.HumanizeComposeBuildError(err), http.StatusBadRequest)
 		return
 	}
 	ids := compose.ReverseOrderedContainerIDs(st, project)
@@ -619,12 +619,12 @@ func (s *Server) handleComposeDown(w http.ResponseWriter, r *http.Request) {
 	}
 	var body composeProjectRequest
 	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&body); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		http.Error(w, image.TrimUserMessage(err), http.StatusBadRequest)
 		return
 	}
 	st, _, project, err := s.loadComposeProject(body)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		http.Error(w, image.HumanizeComposeBuildError(err), http.StatusBadRequest)
 		return
 	}
 	ids := compose.ReverseOrderedContainerIDs(st, project)

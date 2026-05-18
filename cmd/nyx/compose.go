@@ -196,7 +196,9 @@ func postComposeJSON(socket, url string, body any, listKey string) error {
 	defer resp.Body.Close()
 	b, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("%s: %s", resp.Status, strings.TrimSpace(string(b)))
+		msg := strings.TrimSpace(string(b))
+		// Server uses plain-text http.Error bodies; put status on its own line for readability.
+		return fmt.Errorf("%s\n%s", resp.Status, msg)
 	}
 	var out map[string]any
 	if err := json.Unmarshal(b, &out); err != nil {
