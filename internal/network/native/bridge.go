@@ -66,6 +66,15 @@ func tryEnableRouteLocalnet(log *slog.Logger) {
 	}
 }
 
+// tryEnableIPv4Forwarding sets net.ipv4.ip_forward so traffic from the bridge
+// subnet can be forwarded and SNATed toward the host's default route.
+func tryEnableIPv4Forwarding(log *slog.Logger) {
+	p := "/proc/sys/net/ipv4/ip_forward"
+	if err := os.WriteFile(p, []byte("1\n"), 0o644); err != nil {
+		log.Warn("ip_forward", "path", p, "err", err)
+	}
+}
+
 const (
 	// BridgeName is the host-side bridge interface for all nyxd containers.
 	BridgeName = "nyxbr0"
@@ -89,9 +98,11 @@ const vethInfoPeer = 1
 //  3. Creates a veth pair: host-side joins nyxbr0, peer goes into the container netns
 //  4. Sets lo up inside the netns
 //  5. Adds nftables DNAT rules for any port mappings
+//  6. Optionally adds an nft forward drop for compose internal networks (opts.Internal).
 //
 // Returns the allocated container IP.
-func Setup(ctx context.Context, containerID, netNSPath string, ports []network.PortMapping, log *slog.Logger) (string, error) {
+func Setup(ctx context.Context, containerID, netNSPath string, ports []network.PortMapping, opts *network.SetupOptions, log *slog.Logger) (string, error) {
+	internal := opts != nil && opts.Internal
 	// 1. Bridge
 	if err := ensureBridge(log); err != nil {
 		return "", fmt.Errorf("bridge: %w", err)
@@ -145,6 +156,16 @@ func Setup(ctx context.Context, containerID, netNSPath string, ports []network.P
 		}
 	}
 
+	// 6. Compose internal: block IPv4 egress outside the bridge CIDR (nft forward).
+	if internal {
+		if err := addInternalEgressBlock(containerID, ip, log); err != nil {
+			removePortMappings(containerID, log) //nolint:errcheck
+			deleteLink(hostVeth)                 //nolint:errcheck
+			getIPAM().release(containerID)
+			return "", fmt.Errorf("internal network egress: %w", err)
+		}
+	}
+
 	return ip, nil
 }
 
@@ -152,8 +173,13 @@ func Setup(ctx context.Context, containerID, netNSPath string, ports []network.P
 //   - releases its IPAM allocation
 //   - deletes the host-side veth (peer disappears with the netns)
 //   - removes nftables port-mapping rules
+//   - removes compose internal egress filter rules when present
 func Teardown(ctx context.Context, containerID string, log *slog.Logger) error {
 	var errs []error
+
+	if err := removeInternalEgressBlock(containerID, log); err != nil {
+		errs = append(errs, fmt.Errorf("remove internal filter: %w", err))
+	}
 
 	if err := removePortMappings(containerID, log); err != nil {
 		errs = append(errs, fmt.Errorf("remove portmap: %w", err))
@@ -187,8 +213,13 @@ func ensureBridge(log *slog.Logger) error {
 	if bridgeErr != nil {
 		// Reset so next call retries.
 		bridgeOnce = sync.Once{}
+		return bridgeErr
 	}
-	return bridgeErr
+	tryEnableIPv4Forwarding(log)
+	if err := ensureContainerEgressNAT(log); err != nil {
+		log.Warn("container egress nat", "err", err)
+	}
+	return nil
 }
 
 func createBridge(log *slog.Logger) error {
@@ -338,7 +369,7 @@ func moveVethToNetNS(peerVeth, netNSPath, containerIP, gateway string, log *slog
 	}
 
 	// Now configure inside the netns.
-		return inNetNS(netNSPath, func() error {
+	return inNetNS(netNSPath, func() error {
 		fd2, err := unixSocket()
 		if err != nil {
 			return err
@@ -600,7 +631,7 @@ func removePortMappings(containerID string, log *slog.Logger) error {
 	prefix := portmapCommentPrefix(containerID)
 	var errs []error
 	for _, chain := range []string{"prerouting", "output", "postrouting"} {
-		if err := nftDeleteRulesWithCommentPrefix(chain, prefix); err != nil {
+		if err := nftDeleteRulesWithCommentPrefix("nyxd-nat", chain, prefix); err != nil {
 			errs = append(errs, fmt.Errorf("chain %s: %w", chain, err))
 		}
 	}
@@ -629,6 +660,10 @@ var nftTableOnce sync.Once
 func ensureNftTable() error {
 	var initErr error
 	nftTableOnce.Do(func() {
+		// Postrouting SNAT for container→internet is added by [ensureContainerEgressNAT]
+		// (ip saddr <subnet> oifname != bridge masquerade). A rule matching only
+		// oifname "nyxbr0" never sees forwarded WAN-bound traffic, so ping/wget to
+		// public addresses would fail without the egress rule.
 		rules := `
 table ip nyxd-nat {
   chain prerouting {
@@ -639,7 +674,6 @@ table ip nyxd-nat {
   }
   chain postrouting {
     type nat hook postrouting priority srcnat; policy accept;
-    oifname "` + BridgeName + `" masquerade
   }
 }
 `
@@ -664,6 +698,141 @@ table ip nyxd-nat {
 		}
 	})
 	return initErr
+}
+
+// egressNATComment tags the SNAT rule for traffic leaving the host toward non-bridge
+// interfaces (typically the default route / internet).
+const egressNATComment = "nyxd-container-egress"
+
+// ensureContainerEgressNAT adds a postrouting masquerade rule for the container
+// subnet when traffic exits via an interface other than the nyxd bridge. Safe to
+// call repeatedly; skips if a rule with [egressNATComment] is already present.
+// Fixes upgrades from older nyxd that used a non-functional oifname-only masquerade.
+func ensureContainerEgressNAT(log *slog.Logger) error {
+	if err := ensureNftTable(); err != nil {
+		return err
+	}
+	cidr, _ := activeNetConf()
+	if _, _, err := net.ParseCIDR(cidr); err != nil {
+		return fmt.Errorf("egress nat: subnet %q: %w", cidr, err)
+	}
+
+	portMapNftMu.Lock()
+	defer portMapNftMu.Unlock()
+
+	lines, err := nftListChainLines("nyxd-nat", "postrouting")
+	if err != nil {
+		return err
+	}
+	for _, ln := range lines {
+		if strings.Contains(ln, egressNATComment) {
+			return nil
+		}
+	}
+
+	rule := fmt.Sprintf(
+		`nft add rule ip nyxd-nat postrouting ip saddr %s oifname != %q masquerade comment %q`,
+		cidr, BridgeName, egressNATComment,
+	)
+	if err := runNftUnlocked(rule); err != nil {
+		s := strings.ToLower(err.Error())
+		if strings.Contains(s, "file exists") || strings.Contains(s, "exists") {
+			return nil
+		}
+		return err
+	}
+	log.Info("container egress masquerade rule installed", "subnet", cidr, "bridge", BridgeName)
+	return nil
+}
+
+// runNftUnlocked runs nft like [runNft] but does not call [ensureNftTable] (caller
+// must hold [portMapNftMu] when appropriate to avoid races with [ensureNftTable]).
+func runNftUnlocked(rule string) error {
+	return withTimeout(30*time.Second, func() error {
+		cmd := exec.Command("/bin/sh", "-c", rule)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("%w: %s", err, strings.TrimSpace(string(out)))
+		}
+		return nil
+	})
+}
+
+var nftFilterOnce sync.Once
+var nftFilterInitErr error
+
+func ensureNftFilterTable() error {
+	nftFilterOnce.Do(func() {
+		rules := `
+table ip nyxd-filter {
+  chain forward {
+    type filter hook forward priority 0; policy accept;
+  }
+}
+`
+		f, err := os.CreateTemp("", "nyxd-nft-filter-*.rules")
+		if err != nil {
+			nftFilterInitErr = err
+			return
+		}
+		defer os.Remove(f.Name())
+		if _, err := f.WriteString(rules); err != nil {
+			nftFilterInitErr = err
+			return
+		}
+		if err := f.Close(); err != nil {
+			nftFilterInitErr = err
+			return
+		}
+		cmd := exec.Command("/usr/sbin/nft", "-f", f.Name())
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			nftFilterInitErr = fmt.Errorf("nft filter init: %w: %s", err, strings.TrimSpace(string(out)))
+		}
+	})
+	return nftFilterInitErr
+}
+
+func addInternalEgressBlock(containerID, containerIP string, log *slog.Logger) error {
+	if err := ensureNftFilterTable(); err != nil {
+		return err
+	}
+	cidr, _ := activeNetConf()
+	if _, _, err := net.ParseCIDR(cidr); err != nil {
+		return fmt.Errorf("internal filter: subnet %q: %w", cidr, err)
+	}
+
+	portMapNftMu.Lock()
+	defer portMapNftMu.Unlock()
+
+	tag := internalEgressCommentPrefix(containerID)
+	comment := fmt.Sprintf("%s-e0", tag)
+	rule := fmt.Sprintf(
+		`nft add rule ip nyxd-filter forward ip saddr %s ip daddr != %s drop comment %q`,
+		containerIP, cidr, comment,
+	)
+	if err := runNftUnlocked(rule); err != nil {
+		return err
+	}
+	log.Info("internal network egress blocked", "container", containerID, "ip", containerIP, "allow_cidr", cidr)
+	return nil
+}
+
+func removeInternalEgressBlock(containerID string, log *slog.Logger) error {
+	portMapNftMu.Lock()
+	defer portMapNftMu.Unlock()
+
+	prefix := internalEgressCommentPrefix(containerID)
+	err := nftDeleteRulesWithCommentPrefix("nyxd-filter", "forward", prefix)
+	if err != nil {
+		s := strings.ToLower(err.Error())
+		if strings.Contains(s, "could not find") || strings.Contains(s, "no such file") ||
+			strings.Contains(s, "does not exist") {
+			return nil
+		}
+		return err
+	}
+	return nil
 }
 
 // ─── Netlink helpers ──────────────────────────────────────────────────────────

@@ -24,10 +24,11 @@ type UpMeta struct {
 
 // BuildContainerSpecs resolves images (pull when missing), maps each service in
 // dependency order to a [supervisor.ContainerSpec], and returns the slice suitable
-// for [supervisor.Supervisor.StartSequential].
+// for [supervisor.Supervisor.StartComposeUp] (skips unchanged services, recreates changed ones).
 //
 // netDriver and dnsMode mirror nyxd flags (-net-driver, -dns): when both are cni+auto,
 // EmbedDNS is set per service for internal-only compose networks (see ServiceUsesOnlyInternalNetworks).
+// ComposeInternalNet is set the same way; the native driver enforces it with nftables egress drops.
 func BuildContainerSpecs(ctx context.Context, stack *Stack, meta UpMeta, store *image.Store, netDriver, dnsMode string) ([]supervisor.ContainerSpec, error) {
 	if store == nil {
 		return nil, fmt.Errorf("image store is required")
@@ -85,6 +86,7 @@ func BuildContainerSpecs(ctx context.Context, stack *Stack, meta UpMeta, store *
 		}
 
 		embedDNS := false
+		internalNet := ServiceUsesOnlyInternalNetworks(stack, svc)
 		nd := strings.ToLower(strings.TrimSpace(netDriver))
 		dm := strings.ToLower(strings.TrimSpace(dnsMode))
 		if dm == "" {
@@ -104,28 +106,29 @@ func BuildContainerSpecs(ctx context.Context, stack *Stack, meta UpMeta, store *
 		}
 
 		spec := supervisor.ContainerSpec{
-			ID:               composeContainerID(meta.Project, name),
-			Image:            img,
-			ImageConfig:      cfg,
-			ManifestLayers:   m.Layers,
-			BlobPaths:        paths,
-			Env:              EnvMapToSlice(svc.Environment),
-			Args:             composeArgs(&svc, cfg),
-			User:             u,
-			PortMappings:     portMaps,
-			ReadOnly:         svc.ReadOnly,
-			Hostname:         strings.TrimSpace(name),
-			RestartPolicy:    composeRestartPolicy(svc.Restart),
-			StopTimeout:      time.Duration(svc.StopTimeout.Duration),
-			Healthcheck:      hc,
-			ExtraMounts:      mounts,
-			EmbedDNS:         embedDNS,
-			Resources:        res,
-			Privileged:       svc.Privileged,
-			SeccompProfile:   ResolveSeccompProfilePath(meta.ComposeDir, svc.SeccompProfile),
-			CapAdd:           append([]string(nil), svc.CapAdd...),
-			CapDrop:          append([]string(nil), svc.CapDrop...),
-			NoNewPrivileges:  svc.NoNewPrivileges,
+			ID:                 composeContainerID(meta.Project, name),
+			Image:              img,
+			ImageConfig:        cfg,
+			ManifestLayers:     m.Layers,
+			BlobPaths:          paths,
+			Env:                EnvMapToSlice(svc.Environment),
+			Args:               composeArgs(&svc, cfg),
+			User:               u,
+			PortMappings:       portMaps,
+			ReadOnly:           svc.ReadOnly,
+			Hostname:           strings.TrimSpace(name),
+			RestartPolicy:      composeRestartPolicy(svc.Restart),
+			StopTimeout:        time.Duration(svc.StopTimeout.Duration),
+			Healthcheck:        hc,
+			ExtraMounts:        mounts,
+			EmbedDNS:           embedDNS,
+			ComposeInternalNet: internalNet,
+			Resources:          res,
+			Privileged:         svc.Privileged,
+			SeccompProfile:     ResolveSeccompProfilePath(meta.ComposeDir, svc.SeccompProfile),
+			CapAdd:             append([]string(nil), svc.CapAdd...),
+			CapDrop:            append([]string(nil), svc.CapDrop...),
+			NoNewPrivileges:    svc.NoNewPrivileges,
 		}
 		out = append(out, spec)
 	}

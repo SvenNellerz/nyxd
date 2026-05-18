@@ -34,7 +34,9 @@ const mimeExecStreamV1 = "application/x-nyxd-exec+v1"
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
-		fmt.Fprintf(os.Stderr, "nyx: %v\n", err)
+		if !errors.Is(err, errExecReported) {
+			fmt.Fprintf(os.Stderr, "nyx: %v\n", err)
+		}
 		os.Exit(1)
 	}
 }
@@ -402,46 +404,6 @@ func doStopWithContext(ctx context.Context, socket, id string) error {
 	return nil
 }
 
-// execFailureMarker is written by nyxd on the exec response stream after headers
-// when crun exec fails (HTTP 200 was already sent so the client can stream stdout).
-const execFailureMarker = "nyxd: exec:"
-
-// execStdStream copies exec output to the real stdout while retaining a tail of bytes
-// so we can detect [execFailureMarker] after the stream ends.
-type execStdStream struct {
-	W    io.Writer
-	tail []byte
-}
-
-func (s *execStdStream) Write(p []byte) (int, error) {
-	n, err := s.W.Write(p)
-	if err != nil {
-		return n, err
-	}
-	s.tail = append(s.tail, p...)
-	const max = 8192
-	if len(s.tail) > max {
-		s.tail = s.tail[len(s.tail)-max:]
-	}
-	return len(p), nil
-}
-
-func (s *execStdStream) failureFromTail() error {
-	idx := bytes.LastIndex(s.tail, []byte(execFailureMarker))
-	if idx < 0 {
-		return nil
-	}
-	line := bytes.TrimSpace(s.tail[idx:])
-	if nl := bytes.IndexByte(line, '\n'); nl >= 0 {
-		line = line[:nl]
-	}
-	msg := strings.TrimSpace(strings.TrimPrefix(string(line), execFailureMarker))
-	if msg == "" {
-		return fmt.Errorf("exec failed")
-	}
-	return fmt.Errorf("%s", msg)
-}
-
 func execShellStdinHint(argv []string) bool {
 	if len(argv) < 1 {
 		return false
@@ -477,6 +439,61 @@ func execErrIsBenignUserInterrupt(err error, opts execCLIOptions) bool {
 		strings.Contains(s, "signal: interrupt")
 }
 
+// maybeExecShellHint appends a short hint when the image clearly lacks the requested shell.
+// tail is the raw exec byte stream (PTY + nyxd trailer); crun often prints the real reason
+// there while failureFromTail only captures the short "nyxd: exec: crun exec: exit status 255" line.
+func maybeExecShellHint(err error, argv []string, containerID string, tail []byte) error {
+	if err == nil || len(argv) == 0 || containerID == "" {
+		return err
+	}
+	base := strings.ToLower(filepath.Base(strings.TrimSpace(argv[0])))
+	if base != "bash" {
+		return err
+	}
+	low := strings.ToLower(err.Error() + "\n" + string(tail))
+	if !strings.Contains(low, "executable file") &&
+		!strings.Contains(low, "not found in $path") &&
+		!strings.Contains(low, "no such file") {
+		return err
+	}
+	return errExecReported
+}
+
+// shellExit127Hint explains 127 after an interactive sh session when the PTY transcript
+// shows a prior "not found" — bare `exit` reuses $? (ash/busybox/bash).
+func shellExit127Hint(err error, argv []string, tail []byte, wantTTY bool) error {
+	if errors.Is(err, errExecReported) {
+		return err
+	}
+	if err == nil || !wantTTY || len(argv) < 1 {
+		return err
+	}
+	if !strings.Contains(strings.ToLower(err.Error()), "exit status 127") {
+		return err
+	}
+	switch strings.ToLower(filepath.Base(strings.TrimSpace(argv[0]))) {
+	case "sh", "ash", "dash":
+	default:
+		return err
+	}
+	if !strings.Contains(strings.ToLower(string(tail)), "not found") {
+		return err
+	}
+	return fmt.Errorf("%w\nnyx: bare `exit` keeps the last command's status (127 = not found). Use `exit 0` to leave successfully.", err)
+}
+
+func execRequestJSON(argv []string, wantTTY bool) ([]byte, error) {
+	m := map[string]any{"argv": argv, "tty": wantTTY}
+	if wantTTY && term.IsTerminal(int(os.Stdin.Fd())) {
+		cols, rows, err := term.GetSize(int(os.Stdin.Fd()))
+		if err == nil && cols > 0 && rows > 0 {
+			m["cols"] = cols
+			m["rows"] = rows
+		}
+	}
+	return json.Marshal(m)
+}
+
 func doExec(socket string, args []string) error {
 	opts, err := parseExecArgs(args)
 	if err != nil {
@@ -487,11 +504,15 @@ func doExec(socket string, args []string) error {
 	if opts.WantTTY && opts.AttachStdin && term.IsTerminal(int(os.Stdin.Fd())) {
 		old, terr := term.MakeRaw(int(os.Stdin.Fd()))
 		if terr == nil {
-			restoreTTY = func() { _ = term.Restore(int(os.Stdin.Fd()), old) }
+			fd := int(os.Stdin.Fd())
+			restoreTTY = func() {
+				_ = term.Restore(fd, old)
+				nudgeParentShellRedraw()
+				// Show cursor, disable bracketed paste; avoid extra blank lines before the shell prompt.
+				_, _ = fmt.Fprint(os.Stderr, "\x1b[?25h\x1b[?2004l")
+				_ = os.Stderr.Sync()
+			}
 		}
-	}
-	if restoreTTY != nil {
-		defer restoreTTY()
 	}
 
 	c := httpClient(socket)
@@ -499,7 +520,7 @@ func doExec(socket string, args []string) error {
 
 	var req *http.Request
 	if opts.AttachStdin {
-		hdr, err := json.Marshal(map[string]any{"argv": opts.Argv, "tty": opts.WantTTY})
+		hdr, err := execRequestJSON(opts.Argv, opts.WantTTY)
 		if err != nil {
 			return err
 		}
@@ -522,12 +543,21 @@ func doExec(socket string, args []string) error {
 		}
 		req.Header.Set("Content-Type", mimeExecStreamV1)
 	} else {
-		body, _ := json.Marshal(map[string]any{"argv": opts.Argv, "tty": opts.WantTTY})
+		body, err := execRequestJSON(opts.Argv, opts.WantTTY)
+		if err != nil {
+			return err
+		}
 		req, err = http.NewRequest(http.MethodPost, u, bytes.NewReader(body))
 		if err != nil {
 			return err
 		}
 		req.Header.Set("Content-Type", "application/json")
+	}
+
+	// Defer after stdin pipe: LIFO runs this before unblocking stdin so the terminal is
+	// sane again before the stdin copy goroutine wakes up.
+	if restoreTTY != nil {
+		defer restoreTTY()
 	}
 
 	if opts.AttachStdin && execShellStdinHint(opts.Argv) && !opts.WantTTY {
@@ -543,16 +573,39 @@ func doExec(socket string, args []string) error {
 		b, _ := io.ReadAll(resp.Body)
 		return fmt.Errorf("exec: %s: %s", resp.Status, bytes.TrimSpace(b))
 	}
-	sw := &execStdStream{W: os.Stdout}
-	_, copyErr := io.Copy(sw, resp.Body)
-	if ferr := sw.failureFromTail(); ferr != nil {
+	tailRing := &execTailRing{}
+	// Line-based filters break interactive TTYs: raw mode echoes single bytes
+	// without newlines, so output would stay buffered until Enter.
+	display := io.Writer(os.Stdout)
+	var stripNyxd *nyxdExecTrailerFilter
+	var bashFl *bashExecCleanFilter
+	if !opts.WantTTY {
+		stripNyxd = newNyxdExecTrailerFilter(os.Stdout)
+		display = stripNyxd
+		if len(opts.Argv) > 0 && strings.EqualFold(filepath.Base(strings.TrimSpace(opts.Argv[0])), "bash") {
+			bashFl = newBashExecCleanFilter(stripNyxd)
+			display = bashFl
+		}
+	}
+	mw := io.MultiWriter(tailRing, display)
+	_, copyErr := io.Copy(mw, resp.Body)
+	if bashFl != nil {
+		_ = bashFl.Flush()
+	}
+	if stripNyxd != nil {
+		_ = stripNyxd.Flush()
+	}
+	tail := tailRing.Bytes()
+	if ferr := execFailureFromTail(tail); ferr != nil {
 		if execErrIsBenignUserInterrupt(ferr, opts) {
 			return nil
 		}
-		return ferr
+		hintErr := maybeExecShellHint(ferr, opts.Argv, opts.ID, tail)
+		return shellExit127Hint(hintErr, opts.Argv, tail, opts.WantTTY)
 	}
 	if execErrIsBenignUserInterrupt(copyErr, opts) {
 		return nil
 	}
-	return copyErr
+	hintErr := maybeExecShellHint(copyErr, opts.Argv, opts.ID, tail)
+	return shellExit127Hint(hintErr, opts.Argv, tail, opts.WantTTY)
 }

@@ -78,7 +78,7 @@ You should then see:
 The interface is defined in `internal/network/backend.go`:
 
 - `EnsureNetwork()` — host-wide setup (bridge / CNI conflist, etc.)
-- `Setup(ctx, containerID, netNSPath, ports)` — join the container netns, return allocated IP (or equivalent)
+- `Setup(ctx, containerID, netNSPath, ports, opts *SetupOptions)` — join the container netns, return allocated IP (or equivalent). `opts.Internal` (compose `networks.*.internal: true`) is enforced on the **native** driver by nftables forward drops for IPv4 traffic leaving the bridge CIDR; **CNI** ignores `opts` for now (configure plugins separately).
 - `Teardown(ctx, containerID, netNSPath)` — tear down that container’s networking
 
 Implementations:

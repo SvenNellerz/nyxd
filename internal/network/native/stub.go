@@ -29,8 +29,8 @@ func (m *Manager) EnsureNetwork() error {
 }
 
 // Setup is unsupported off Linux.
-func (m *Manager) Setup(ctx context.Context, containerID, netNSPath string, ports []network.PortMapping) (string, error) {
-	_, _, _, _ = ctx, containerID, netNSPath, ports
+func (m *Manager) Setup(ctx context.Context, containerID, netNSPath string, ports []network.PortMapping, opts *network.SetupOptions) (string, error) {
+	_, _, _, _, _ = ctx, containerID, netNSPath, ports, opts
 	return "", fmt.Errorf("native network: supported only on linux")
 }
 

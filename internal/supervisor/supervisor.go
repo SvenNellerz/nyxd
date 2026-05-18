@@ -29,6 +29,11 @@ import (
 	"github.com/zrougamed/nyxd/pkg/oci"
 )
 
+// defaultStopGrace is used when ContainerSpec.StopTimeout is zero (compose omitting
+// stop_grace_period, or nyx run without an explicit stop budget). Matches Docker's
+// default `docker stop` grace (~10s) instead of blocking ~90s on workloads that ignore SIGTERM.
+const defaultStopGrace = 10 * time.Second
+
 // RestartPolicy controls when a container is restarted after exit.
 type RestartPolicy string
 
@@ -67,14 +72,17 @@ type ContainerSpec struct {
 	// EmbedDNS marks compose services on CNI with -dns auto that use internal-only networks,
 	// so the embedded resolver registers their hostnames. Ignored for native and for -dns embedded.
 	EmbedDNS bool `json:"embed_dns,omitempty"`
+	// ComposeInternalNet is true when every compose network for the service has internal: true.
+	// The native driver blocks IPv4 egress outside the bridge CIDR (nft forward).
+	ComposeInternalNet bool `json:"compose_internal_net,omitempty"`
 
-	Privileged       bool                   `json:"privileged,omitempty"`
-	SeccompProfile   string                 `json:"seccomp_profile,omitempty"`
-	CapAdd           []string               `json:"cap_add,omitempty"`
-	CapDrop          []string               `json:"cap_drop,omitempty"`
-	NoNewPrivileges  *bool                  `json:"no_new_privileges,omitempty"`
-	UIDMappings      []bundle.LinuxIDMapping `json:"uid_mappings,omitempty"`
-	GIDMappings      []bundle.LinuxIDMapping `json:"gid_mappings,omitempty"`
+	Privileged      bool                    `json:"privileged,omitempty"`
+	SeccompProfile  string                  `json:"seccomp_profile,omitempty"`
+	CapAdd          []string                `json:"cap_add,omitempty"`
+	CapDrop         []string                `json:"cap_drop,omitempty"`
+	NoNewPrivileges *bool                   `json:"no_new_privileges,omitempty"`
+	UIDMappings     []bundle.LinuxIDMapping `json:"uid_mappings,omitempty"`
+	GIDMappings     []bundle.LinuxIDMapping `json:"gid_mappings,omitempty"`
 }
 
 // containerEntry tracks runtime state for a supervised container.
@@ -124,18 +132,18 @@ func New(rt *runtime.Runtime, ovl *overlay.Manager, net network.Backend, baseDir
 		dns = netdns.Noop{}
 	}
 	s := &Supervisor{
-		rt:          rt,
-		ovl:         ovl,
-		net:         net,
-		imgStore:    imgStore,
-		logColl:     logColl,
-		log:         log,
-		baseDir:     baseDir,
-		dns:         dns,
-		netDriver:   strings.ToLower(strings.TrimSpace(netDriver)),
-		dnsMode:     strings.ToLower(strings.TrimSpace(dnsMode)),
-		dnsGateway:  strings.TrimSpace(dnsGateway),
-		containers:  make(map[string]*containerEntry),
+		rt:         rt,
+		ovl:        ovl,
+		net:        net,
+		imgStore:   imgStore,
+		logColl:    logColl,
+		log:        log,
+		baseDir:    baseDir,
+		dns:        dns,
+		netDriver:  strings.ToLower(strings.TrimSpace(netDriver)),
+		dnsMode:    strings.ToLower(strings.TrimSpace(dnsMode)),
+		dnsGateway: strings.TrimSpace(dnsGateway),
+		containers: make(map[string]*containerEntry),
 	}
 	s.reconcilePersisted()
 	s.reconcileCrunOrphans()
@@ -240,10 +248,7 @@ func (s *Supervisor) Stop(ctx context.Context, id string) error {
 
 	waitBudget := entry.spec.StopTimeout
 	if waitBudget == 0 {
-		waitBudget = 90 * time.Second
-	}
-	if waitBudget < 45*time.Second {
-		waitBudget = 45 * time.Second
+		waitBudget = defaultStopGrace
 	}
 
 	sig := "TERM"
@@ -428,12 +433,12 @@ func (s *Supervisor) List() []string {
 
 // ContainerInfo is a stable JSON shape for list/ps APIs.
 type ContainerInfo struct {
-	ID     string `json:"id"`
+	ID      string `json:"id"`
 	ShortID string `json:"short_id"`
-	Image  string `json:"image"`
-	IP     string `json:"ip,omitempty"`
-	Ports  string `json:"ports,omitempty"`
-	Status string `json:"status"`
+	Image   string `json:"image"`
+	IP      string `json:"ip,omitempty"`
+	Ports   string `json:"ports,omitempty"`
+	Status  string `json:"status"`
 }
 
 func formatPortMappings(pm []network.PortMapping) string {
@@ -536,7 +541,7 @@ func (s *Supervisor) Shutdown(ctx context.Context) {
 		}(id)
 	}
 	wg.Wait()
-	s.	wg.Wait()
+	s.wg.Wait()
 	s.dns.Shutdown()
 }
 
@@ -643,7 +648,11 @@ func (s *Supervisor) startOnce(ctx context.Context, e *containerEntry) (fastExit
 	}
 	e.netNS = nsPath
 
-	ip, err := s.net.Setup(ctx, spec.ID, nsPath, spec.PortMappings)
+	var netOpts *network.SetupOptions
+	if spec.ComposeInternalNet {
+		netOpts = &network.SetupOptions{Internal: true}
+	}
+	ip, err := s.net.Setup(ctx, spec.ID, nsPath, spec.PortMappings, netOpts)
 	if err != nil {
 		network.DeleteNetNS(spec.ID) //nolint:errcheck
 		s.ovl.Remove(spec.ID)        //nolint:errcheck
@@ -706,6 +715,8 @@ func (s *Supervisor) startOnce(ctx context.Context, e *containerEntry) (fastExit
 	if err := writeBundleRunMeta(bundleDir, meta); err != nil {
 		log.Warn("write bundle meta", "err", err)
 	}
+
+	s.ensureCrunIDFreeForFreshStart(ctx, spec.ID, log)
 
 	// 4. crun run (foreground): stdio piped to log collector JSONL files.
 	e.mu.Lock()
@@ -798,12 +809,30 @@ func (s *Supervisor) startOnce(ctx context.Context, e *containerEntry) (fastExit
 	}
 }
 
+// ensureCrunIDFreeForFreshStart removes OCI state for id if crun still has it.
+// After an unclean shutdown the supervisor may have no record while crun does,
+// which makes `crun run` fail with "already exists" and leaves `nyx ps` empty.
+func (s *Supervisor) ensureCrunIDFreeForFreshStart(ctx context.Context, id string, log *slog.Logger) {
+	_, err := s.rt.State(ctx, id)
+	if err != nil {
+		if runtime.CrunContainerAbsent(err) {
+			return
+		}
+		log.Debug("crun state probe before run", "id", id, "err", err)
+		return
+	}
+	log.Warn("crun id already in runtime; deleting stale state before run", "id", id)
+	if err := s.rt.Delete(ctx, id, true); err != nil && !runtime.CrunContainerAbsent(err) {
+		log.Warn("stale crun delete before run", "id", id, "err", err)
+	}
+}
+
 // finishForegroundFastExit tears down after crun's foreground `run` returns with exit
 // status 0 before we observed OCI "running" (race with the status ticker).
 func (s *Supervisor) finishForegroundFastExit(ctx context.Context, e *containerEntry) {
 	s.resetLogIO(e)
 	s.teardownNetwork(ctx, e.spec.ID)
-	s.ovl.Remove(e.spec.ID) //nolint:errcheck
+	s.ovl.Remove(e.spec.ID)            //nolint:errcheck
 	s.rt.Delete(ctx, e.spec.ID, false) //nolint:errcheck
 }
 

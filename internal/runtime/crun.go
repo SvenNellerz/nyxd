@@ -20,6 +20,12 @@ import (
 	"github.com/creack/pty"
 )
 
+// TTYSize is the initial pseudo-terminal geometry for [Runtime.Exec] when tty is true.
+type TTYSize struct {
+	Rows uint16
+	Cols uint16
+}
+
 // State mirrors crun's container state output.
 type State struct {
 	ID          string            `json:"id"`
@@ -319,14 +325,16 @@ func (r *Runtime) exitCodeFromRawState(ctx context.Context, containerID string) 
 // Exec runs a one-shot process inside a running container (crun exec).
 // If stdin is non-nil, it is wired to crun's stdin (streaming).
 // If tty is true, crun is run with --tty and stdio is attached to a host PTY (github.com/creack/pty),
-// so shells and line-editing behave like docker exec -it.
+// so shells and line-editing behave like docker exec -it. win sets the initial PTY size
+// (rows/cols); when nil or zero-sized with tty, a default 24×80 is used so shells still
+// render a prompt without waiting for input.
 //
 // When stdin comes from a long-lived HTTP body (nyx exec -i), os/exec would otherwise
 // block forever in Wait: it waits for stdin copy to reach EOF after the child exits.
 // WaitDelay lets the runtime close stdin/stdout pipes shortly after the process exits
 // so one-shot commands like `nyx exec -it cid ls` complete while the client keeps the
 // request body open for interactive use.
-func (r *Runtime) Exec(ctx context.Context, containerID string, argv []string, stdin io.Reader, stdout, stderr io.Writer, tty bool) error {
+func (r *Runtime) Exec(ctx context.Context, containerID string, argv []string, stdin io.Reader, stdout, stderr io.Writer, tty bool, sz *TTYSize) error {
 	if len(argv) == 0 {
 		return fmt.Errorf("exec: empty argv")
 	}
@@ -338,7 +346,7 @@ func (r *Runtime) Exec(ctx context.Context, containerID string, argv []string, s
 	args := append(base, argv...)
 
 	if tty {
-		return r.execTTY(ctx, args, stdin, stdout, stderr)
+		return r.execTTY(ctx, args, stdin, stdout, stderr, sz)
 	}
 
 	cmd := exec.CommandContext(ctx, r.binary, args...)
@@ -371,11 +379,21 @@ func (r *Runtime) Exec(ctx context.Context, containerID string, argv []string, s
 	return nil
 }
 
-func (r *Runtime) execTTY(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) error {
+func (r *Runtime) execTTY(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer, sz *TTYSize) error {
 	cmd := exec.CommandContext(ctx, r.binary, args...)
 	cmd.WaitDelay = 800 * time.Millisecond
 
-	ptyMaster, err := pty.StartWithSize(cmd, nil)
+	ws := &pty.Winsize{Rows: 24, Cols: 80}
+	if sz != nil {
+		if sz.Rows > 0 {
+			ws.Rows = sz.Rows
+		}
+		if sz.Cols > 0 {
+			ws.Cols = sz.Cols
+		}
+	}
+
+	ptyMaster, err := pty.StartWithSize(cmd, ws)
 	if err != nil {
 		return fmt.Errorf("crun exec: %w", err)
 	}

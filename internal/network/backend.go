@@ -9,6 +9,6 @@ import "context"
 // See docs/networking.md for daemon flags and how the supervisor uses this interface.
 type Backend interface {
 	EnsureNetwork() error
-	Setup(ctx context.Context, containerID, netNSPath string, ports []PortMapping) (string, error)
+	Setup(ctx context.Context, containerID, netNSPath string, ports []PortMapping, opts *SetupOptions) (string, error)
 	Teardown(ctx context.Context, containerID, netNSPath string) error
 }

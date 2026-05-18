@@ -6,18 +6,21 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/miekg/dns"
 )
 
-// Embedded serves minimal authoritative A records on the bridge gateway UDP/53.
-// It is not a recursive resolver; unknown names return NXDOMAIN.
+// Embedded serves authoritative A records for registered containers on the bridge
+// gateway UDP/53. Other queries are forwarded to the host's configured resolvers
+// (from resolv.conf), with a public-DNS fallback when none are found.
 type Embedded struct {
 	log *slog.Logger
 	gw  net.IP
 
 	mu        sync.RWMutex
 	records   map[string]net.IP // FQDN lower case with trailing dot
+	upstreams []string          // host:53 UDP forward targets
 	server    *dns.Server
 	startErr  error
 	startOnce sync.Once
@@ -28,10 +31,13 @@ func NewEmbedded(log *slog.Logger, gw net.IP) *Embedded {
 	if log == nil {
 		log = slog.Default()
 	}
+	up := hostUpstreamResolvers()
+	log.Info("embedded dns upstreams", "addrs", up)
 	return &Embedded{
-		log:     log,
-		gw:      gw.To4(),
-		records: make(map[string]net.IP),
+		log:       log,
+		gw:        gw.To4(),
+		records:   make(map[string]net.IP),
+		upstreams: up,
 	}
 }
 
@@ -103,25 +109,50 @@ func (e *Embedded) serve(w dns.ResponseWriter, r *dns.Msg) {
 		return
 	}
 	q := r.Question[0]
-	if q.Qtype != dns.TypeA {
-		m.Rcode = dns.RcodeNotImplemented
-		_ = w.WriteMsg(m)
-		return
-	}
 	qname := strings.ToLower(q.Name)
 	e.mu.RLock()
-	ip, ok := e.records[qname]
+	ip, local := e.records[qname]
 	e.mu.RUnlock()
-	if !ok {
-		m.Rcode = dns.RcodeNameError
+	if local {
+		if q.Qtype != dns.TypeA {
+			m.Rcode = dns.RcodeSuccess
+			_ = w.WriteMsg(m)
+			return
+		}
+		m.Answer = append(m.Answer, &dns.A{
+			Hdr: dns.RR_Header{Name: q.Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 30},
+			A:   ip,
+		})
 		_ = w.WriteMsg(m)
 		return
 	}
-	m.Answer = append(m.Answer, &dns.A{
-		Hdr: dns.RR_Header{Name: q.Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 30},
-		A:   ip,
-	})
+	if resp := e.forward(r); resp != nil {
+		_ = w.WriteMsg(resp)
+		return
+	}
+	m.SetReply(r)
+	m.Authoritative = true
+	m.Rcode = dns.RcodeServerFailure
 	_ = w.WriteMsg(m)
+}
+
+func (e *Embedded) forward(r *dns.Msg) *dns.Msg {
+	if len(e.upstreams) == 0 {
+		return nil
+	}
+	c := &dns.Client{Net: "udp", Timeout: 4 * time.Second}
+	req := r.Copy()
+	for _, addr := range e.upstreams {
+		in, _, err := c.Exchange(req, addr)
+		if err != nil {
+			e.log.Debug("embedded dns forward", "upstream", addr, "err", err)
+			continue
+		}
+		if in != nil {
+			return in
+		}
+	}
+	return nil
 }
 
 // Deregister removes all names derived from host (short + nyxd.local FQDN).

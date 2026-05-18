@@ -69,7 +69,8 @@ func (m *Manager) EnsureNetwork() error {
 
 // Setup adds a container to the network.
 // Returns the assigned IP address.
-func (m *Manager) Setup(ctx context.Context, containerID, netNS string, portMappings []PortMapping) (string, error) {
+func (m *Manager) Setup(ctx context.Context, containerID, netNS string, portMappings []PortMapping, opts *SetupOptions) (string, error) {
+	_ = opts // compose internal: enforce via native driver; CNI relies on plugin config
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -105,6 +106,17 @@ func (m *Manager) Teardown(ctx context.Context, containerID, netNS string) error
 	return err
 }
 
+// clearNetNSPath removes a leftover netns bind-mount or file under nsPath.
+// After an unclean nyxd stop (SIGINT/SIGKILL), the mount can remain; a plain os.Create
+// then fails with EPERM because the path is still a mount point.
+func clearNetNSPath(nsPath string) error {
+	_ = detachUnmount(nsPath)
+	if err := os.Remove(nsPath); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
 // CreateNetNS creates a new network namespace and returns its path.
 func CreateNetNS(containerID string) (string, error) {
 	nsDir := "/run/nyxd/netns"
@@ -112,6 +124,14 @@ func CreateNetNS(containerID string) (string, error) {
 		return "", err
 	}
 	nsPath := filepath.Join(nsDir, containerID)
+
+	if _, err := os.Stat(nsPath); err == nil {
+		if err := clearNetNSPath(nsPath); err != nil {
+			return "", fmt.Errorf("clear stale netns path %q: %w", nsPath, err)
+		}
+	} else if !os.IsNotExist(err) {
+		return "", err
+	}
 
 	// Create an empty file to bind-mount the netns into.
 	f, err := os.Create(nsPath)
@@ -133,8 +153,7 @@ func CreateNetNS(containerID string) (string, error) {
 // DeleteNetNS unmounts and removes a network namespace.
 func DeleteNetNS(containerID string) error {
 	nsPath := filepath.Join("/run/nyxd/netns", containerID)
-	_ = detachUnmount(nsPath)
-	return os.Remove(nsPath)
+	return clearNetNSPath(nsPath)
 }
 
 // PortMapping defines a host:container port mapping.
@@ -238,15 +257,15 @@ func (m *Manager) buildConfList() map[string]any {
 		"name":       m.netName,
 		"plugins": []map[string]any{
 			{
-				"type":             "bridge",
-				"bridge":           bridgeName,
-				"isGateway":        true,
-				"ipMasq":           true,
-				"hairpinMode":      true,
-				"forceAddress":     false,
-				"mtu":              defaultMTU,
+				"type":         "bridge",
+				"bridge":       bridgeName,
+				"isGateway":    true,
+				"ipMasq":       true,
+				"hairpinMode":  true,
+				"forceAddress": false,
+				"mtu":          defaultMTU,
 				"ipam": map[string]any{
-					"type":   "host-local",
+					"type": "host-local",
 					"ranges": [][]map[string]any{{{
 						"subnet":  subnet,
 						"gateway": firstIP(subnet),

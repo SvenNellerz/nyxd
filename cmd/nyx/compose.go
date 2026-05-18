@@ -72,7 +72,8 @@ func doCompose(socket string, args []string) error {
 flags:
   -f, --file PATH     compose file (default: first match in cwd — nyx-compose.yaml,
                       docker-compose.yml, compose.yaml, podman-compose.yml, and .yaml variants)
-  --project NAME      stack prefix (must match the value used with up)
+  --project NAME      stack prefix for container IDs and volumes (must match across up/stop/down).
+                      If omitted, defaults to the compose file's parent directory name.
   -v, --volumes       (down only) delete declared named volume host dirs after remove
 
 examples:
@@ -115,7 +116,7 @@ func doComposeUp(socket string, opts composeCLI) error {
 	if opts.project != "" {
 		body["project"] = opts.project
 	}
-	return postComposeJSON(socket, "http://unix/v1/compose/up", body, "ids")
+	return postComposeJSON(socket, "http://unix/v1/compose/up", body, "ids", "Starting compose stack…")
 }
 
 func doComposeStop(socket string, opts composeCLI) error {
@@ -127,7 +128,7 @@ func doComposeStop(socket string, opts composeCLI) error {
 	if opts.project != "" {
 		body["project"] = opts.project
 	}
-	return postComposeJSON(socket, "http://unix/v1/compose/stop", body, "stopped")
+	return postComposeJSON(socket, "http://unix/v1/compose/stop", body, "stopped", "Stopping containers…")
 }
 
 func doComposeDown(socket string, opts composeCLI) error {
@@ -142,24 +143,9 @@ func doComposeDown(socket string, opts composeCLI) error {
 	if opts.removeVolumes {
 		body["remove_volumes"] = true
 	}
-	raw, err := json.Marshal(body)
+	b, err := postComposePOST(socket, "http://unix/v1/compose/down", body, "Stopping and removing containers…")
 	if err != nil {
-		return err
-	}
-	c := httpClient(socket)
-	req, err := http.NewRequest(http.MethodPost, "http://unix/v1/compose/down", bytes.NewReader(raw))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := c.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	b, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("compose down: %s: %s", resp.Status, strings.TrimSpace(string(b)))
+		return fmt.Errorf("compose down: %w", err)
 	}
 	var out struct {
 		OK                 bool     `json:"ok"`
@@ -168,6 +154,9 @@ func doComposeDown(socket string, opts composeCLI) error {
 	}
 	if err := json.Unmarshal(b, &out); err != nil || !out.OK {
 		return fmt.Errorf("compose down: bad response: %s", bytes.TrimSpace(b))
+	}
+	if n := len(out.Removed); n > 0 {
+		fmt.Fprintf(os.Stderr, "Stopped %d container(s): %s\n", n, strings.Join(out.Removed, ", "))
 	}
 	for _, id := range out.Removed {
 		fmt.Println(id)
@@ -178,27 +167,42 @@ func doComposeDown(socket string, opts composeCLI) error {
 	return nil
 }
 
-func postComposeJSON(socket, url string, body any, listKey string) error {
+// postComposePOST sends a compose JSON POST and returns the OK response body.
+func postComposePOST(socket, url string, body any, spinner string) ([]byte, error) {
 	raw, err := json.Marshal(body)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	c := httpClient(socket)
 	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(raw))
 	if err != nil {
-		return err
+		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := c.Do(req)
+	var resp *http.Response
+	err = withStderrSpinner(spinner, func() error {
+		var e error
+		resp, e = c.Do(req)
+		return e
+	})
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer resp.Body.Close()
-	b, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != http.StatusOK {
-		msg := strings.TrimSpace(string(b))
-		// Server uses plain-text http.Error bodies; put status on its own line for readability.
-		return fmt.Errorf("%s\n%s", resp.Status, msg)
+	b, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("%s\n%s", resp.Status, strings.TrimSpace(string(b)))
+	}
+	return b, nil
+}
+
+func postComposeJSON(socket, url string, body any, listKey, spinner string) error {
+	b, err := postComposePOST(socket, url, body, spinner)
+	if err != nil {
+		return err
 	}
 	var out map[string]any
 	if err := json.Unmarshal(b, &out); err != nil {
@@ -210,6 +214,19 @@ func postComposeJSON(socket, url string, body any, listKey string) error {
 	rawList, ok := out[listKey].([]any)
 	if !ok {
 		return nil
+	}
+	if n := len(rawList); n > 0 && spinner != "" {
+		label := "Stopped"
+		if strings.Contains(spinner, "Starting") {
+			label = "Started"
+		}
+		ids := make([]string, 0, n)
+		for _, v := range rawList {
+			if s, ok := v.(string); ok {
+				ids = append(ids, s)
+			}
+		}
+		fmt.Fprintf(os.Stderr, "%s %d container(s): %s\n", label, n, strings.Join(ids, ", "))
 	}
 	for _, v := range rawList {
 		if s, ok := v.(string); ok {

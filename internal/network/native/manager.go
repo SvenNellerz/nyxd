@@ -43,6 +43,7 @@ func (m *Manager) EnsureNetwork() error {
 		return fmt.Errorf("ensure bridge: %w", err)
 	}
 	tryEnableRouteLocalnet(m.log)
+	tryEnableIPv4Forwarding(m.log)
 	ensureNftTable()
 	m.log.Info("nyx network ready", "bridge", BridgeName, "gateway", GatewayIP)
 	return nil
@@ -50,8 +51,8 @@ func (m *Manager) EnsureNetwork() error {
 
 // Setup configures networking for containerID in netNSPath.
 // Returns the container's allocated IP address.
-func (m *Manager) Setup(ctx context.Context, containerID, netNSPath string, ports []network.PortMapping) (string, error) {
-	ip, err := Setup(ctx, containerID, netNSPath, ports, m.log)
+func (m *Manager) Setup(ctx context.Context, containerID, netNSPath string, ports []network.PortMapping, opts *network.SetupOptions) (string, error) {
+	ip, err := Setup(ctx, containerID, netNSPath, ports, opts, m.log)
 	if err != nil {
 		return "", err
 	}

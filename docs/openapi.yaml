@@ -306,7 +306,7 @@ paths:
 
         Body variants:
         - `application/json` — `ExecRequest` only (stdin closed).
-        - `application/x-nyxd-exec+v1` — first line is JSON `ExecRequest` (`argv`, optional `tty`);
+        - `application/x-nyxd-exec+v1` — first line is JSON `ExecRequest` (`argv`, optional `tty`, optional `rows`/`cols`);
           remaining bytes stream to `crun exec` stdin (`nyx exec -i`).
       operationId: execInContainer
       parameters:
@@ -844,9 +844,10 @@ components:
         project:
           type: string
           description: |
-            Prefix for named volume directories and container IDs. Defaults to the compose filename stem
-            (when using `file`) or the basename of `context_dir` (when using `yaml`). Use the same value
-            for `up`, `stop`, and `down`.
+            Prefix for named volume directories and container IDs. When omitted, defaults to the
+            basename of the compose file's parent directory if `file` is set (Docker Compose style),
+            or the basename of `context_dir` if `yaml` is set. Use the same value for `up`, `stop`,
+            and `down`.
         remove_volumes:
           type: boolean
           description: When true (compose down only), delete on-disk named volume directories declared in the file after containers are removed
@@ -924,3 +925,11 @@ components:
         tty:
           type: boolean
           description: If true, allocate a pseudo-terminal (crun exec --tty) for shells and line editing.
+        rows:
+          type: integer
+          minimum: 1
+          description: Initial PTY height (optional). Sent by nyx for `-t` when stdin is a TTY.
+        cols:
+          type: integer
+          minimum: 1
+          description: Initial PTY width (optional). Sent by nyx for `-t` when stdin is a TTY.

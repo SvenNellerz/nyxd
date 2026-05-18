@@ -212,6 +212,28 @@ func (s *Server) handleContainers(w http.ResponseWriter, r *http.Request) {
 type execRequest struct {
 	Argv []string `json:"argv"`
 	TTY  bool     `json:"tty,omitempty"`
+	Rows uint16   `json:"rows,omitempty"`
+	Cols uint16   `json:"cols,omitempty"`
+}
+
+// execTTYWinSize returns the initial PTY dimensions for crun exec --tty.
+// When tty is false, returns nil. When rows/cols are omitted or zero, returns nil
+// so the runtime applies a non-zero default (see [runtime.Runtime.execTTY]).
+func execTTYWinSize(body execRequest) *runtime.TTYSize {
+	if !body.TTY {
+		return nil
+	}
+	if body.Rows == 0 && body.Cols == 0 {
+		return nil
+	}
+	w := &runtime.TTYSize{Rows: 24, Cols: 80}
+	if body.Rows > 0 {
+		w.Rows = body.Rows
+	}
+	if body.Cols > 0 {
+		w.Cols = body.Cols
+	}
+	return w
 }
 
 type flushWriter struct{ http.ResponseWriter }
@@ -312,7 +334,7 @@ func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
 	if execCtx == nil {
 		execCtx = context.Background()
 	}
-	if err := s.rt.Exec(execCtx, id, body.Argv, stdin, fw, fw, body.TTY); err != nil {
+	if err := s.rt.Exec(execCtx, id, body.Argv, stdin, fw, fw, body.TTY, execTTYWinSize(body)); err != nil {
 		s.log.Warn("control exec", "id", id, "err", err)
 		// Headers are already 200 — still surface the failure on the exec byte stream so
 		// the client is not left with a silent empty body (common when crun fails or the
@@ -505,7 +527,7 @@ func (s *Server) loadComposeProject(body composeProjectRequest) (*compose.Stack,
 		}
 		composeDir = filepath.Dir(abs)
 		if strings.TrimSpace(body.Project) == "" {
-			body.Project = strings.TrimSuffix(filepath.Base(abs), filepath.Ext(abs))
+			body.Project = compose.DefaultProjectFromComposeFile(abs)
 		}
 	} else {
 		composeDir = strings.TrimSpace(body.ContextDir)
@@ -564,7 +586,7 @@ func (s *Server) handleComposeUp(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, image.HumanizeComposeBuildError(err), http.StatusBadRequest)
 		return
 	}
-	if err := s.sup.StartSequential(baseCtx, specs); err != nil {
+	if err := s.sup.StartComposeUp(baseCtx, specs); err != nil {
 		s.log.Warn("compose up", "err", err)
 		http.Error(w, image.TrimUserMessage(err), http.StatusBadRequest)
 		return

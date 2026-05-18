@@ -17,10 +17,15 @@ func portmapCommentPrefix(containerID string) string {
 	return fmt.Sprintf("nyxdpm-%x", h[:12])
 }
 
+func internalEgressCommentPrefix(containerID string) string {
+	h := sha256.Sum256([]byte("internal:" + containerID))
+	return fmt.Sprintf("nyxdint-%x", h[:12])
+}
+
 var handleSuffix = regexp.MustCompile(`#\s*handle\s+(\d+)\s*$`)
 
-func nftListChainLines(chain string) ([]string, error) {
-	out, err := exec.Command("/usr/sbin/nft", "-a", "list", "chain", "ip", "nyxd-nat", chain).CombinedOutput()
+func nftListChainLines(table, chain string) ([]string, error) {
+	out, err := exec.Command("/usr/sbin/nft", "-a", "list", "chain", "ip", table, chain).CombinedOutput()
 	if err != nil {
 		return nil, fmt.Errorf("nft list chain %s: %w: %s", chain, err, strings.TrimSpace(string(out)))
 	}
@@ -46,9 +51,9 @@ func parseHandle(line string) (uint64, bool) {
 	return h, true
 }
 
-func nftDeleteRulesWithCommentPrefix(chain, prefix string) error {
+func nftDeleteRulesWithCommentPrefix(table, chain, prefix string) error {
 	for {
-		lines, err := nftListChainLines(chain)
+		lines, err := nftListChainLines(table, chain)
 		if err != nil {
 			return err
 		}
@@ -64,7 +69,7 @@ func nftDeleteRulesWithCommentPrefix(chain, prefix string) error {
 			return nil
 		}
 		sort.Slice(handles, func(i, j int) bool { return handles[i] > handles[j] })
-		rule := fmt.Sprintf("nft delete rule ip nyxd-nat %s handle %d", chain, handles[0])
+		rule := fmt.Sprintf("nft delete rule ip %s %s handle %d", table, chain, handles[0])
 		if err := runNft(rule); err != nil {
 			return fmt.Errorf("nft delete %s handle %d: %w", chain, handles[0], err)
 		}
