@@ -17,6 +17,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"golang.org/x/term"
 )
 
 func defaultSocket() string {
@@ -27,6 +29,7 @@ func defaultSocket() string {
 }
 
 // mimeExecStreamV1 must match internal/control for streaming stdin (nyx exec -i).
+// First JSON line may include "tty": true for PTY allocation.
 const mimeExecStreamV1 = "application/x-nyxd-exec+v1"
 
 func main() {
@@ -141,7 +144,7 @@ commands:
       aliases: same as ps, rm, logs with different word order
   exec [-i] [-t|-it] <id> [--] <argv...>
       run a command in a running container; -i streams stdin from this terminal.
-      -t is accepted but there is no PTY — shells are line-based only.
+      -t allocates a PTY (shell prompt, line editing); combine as -it for an interactive shell.
 
   compose up|stop|down [-f|--file PATH] [--project NAME] [-v|--volumes]
       compose up: start stack (default file: first of nyx-compose.yaml, docker-compose.yml,
@@ -451,10 +454,44 @@ func execShellStdinHint(argv []string) bool {
 	}
 }
 
+// unblockStdinRead forces any blocked Read on stdin to return so the stdin→exec pipe
+// goroutine can exit after the HTTP response body has finished.
+func unblockStdinRead() {
+	if f, ok := any(os.Stdin).(interface{ SetReadDeadline(time.Time) error }); ok {
+		_ = f.SetReadDeadline(time.Now().Add(-time.Second))
+	}
+}
+
+func clearStdinReadDeadline() {
+	if f, ok := any(os.Stdin).(interface{ SetReadDeadline(time.Time) error }); ok {
+		_ = f.SetReadDeadline(time.Time{})
+	}
+}
+
+func execErrIsBenignUserInterrupt(err error, opts execCLIOptions) bool {
+	if err == nil || !opts.WantTTY {
+		return false
+	}
+	s := err.Error()
+	return strings.Contains(s, "exit status 130") ||
+		strings.Contains(s, "signal: interrupt")
+}
+
 func doExec(socket string, args []string) error {
 	opts, err := parseExecArgs(args)
 	if err != nil {
 		return err
+	}
+
+	var restoreTTY func()
+	if opts.WantTTY && opts.AttachStdin && term.IsTerminal(int(os.Stdin.Fd())) {
+		old, terr := term.MakeRaw(int(os.Stdin.Fd()))
+		if terr == nil {
+			restoreTTY = func() { _ = term.Restore(int(os.Stdin.Fd()), old) }
+		}
+	}
+	if restoreTTY != nil {
+		defer restoreTTY()
 	}
 
 	c := httpClient(socket)
@@ -462,18 +499,22 @@ func doExec(socket string, args []string) error {
 
 	var req *http.Request
 	if opts.AttachStdin {
-		pr, pw := io.Pipe()
-		hdr, err := json.Marshal(map[string][]string{"argv": opts.Argv})
+		hdr, err := json.Marshal(map[string]any{"argv": opts.Argv, "tty": opts.WantTTY})
 		if err != nil {
 			return err
 		}
+		pr, pw := io.Pipe()
+		defer func() {
+			unblockStdinRead()
+			clearStdinReadDeadline()
+		}()
 		go func() {
 			if _, werr := pw.Write(append(hdr, '\n')); werr != nil {
 				_ = pw.CloseWithError(werr)
 				return
 			}
-			_, copyErr := io.Copy(pw, os.Stdin)
-			_ = pw.CloseWithError(copyErr)
+			_, _ = io.Copy(pw, os.Stdin)
+			_ = pw.Close()
 		}()
 		req, err = http.NewRequest(http.MethodPost, u, pr)
 		if err != nil {
@@ -481,7 +522,7 @@ func doExec(socket string, args []string) error {
 		}
 		req.Header.Set("Content-Type", mimeExecStreamV1)
 	} else {
-		body, _ := json.Marshal(map[string][]string{"argv": opts.Argv})
+		body, _ := json.Marshal(map[string]any{"argv": opts.Argv, "tty": opts.WantTTY})
 		req, err = http.NewRequest(http.MethodPost, u, bytes.NewReader(body))
 		if err != nil {
 			return err
@@ -489,7 +530,7 @@ func doExec(socket string, args []string) error {
 		req.Header.Set("Content-Type", "application/json")
 	}
 
-	if opts.AttachStdin && execShellStdinHint(opts.Argv) {
+	if opts.AttachStdin && execShellStdinHint(opts.Argv) && !opts.WantTTY {
 		fmt.Fprintf(os.Stderr, "nyx: note: exec has no PTY, so shells show no prompt. Type a command and press Enter; use exit or Ctrl+D to finish.\n")
 	}
 
@@ -505,7 +546,13 @@ func doExec(socket string, args []string) error {
 	sw := &execStdStream{W: os.Stdout}
 	_, copyErr := io.Copy(sw, resp.Body)
 	if ferr := sw.failureFromTail(); ferr != nil {
+		if execErrIsBenignUserInterrupt(ferr, opts) {
+			return nil
+		}
 		return ferr
+	}
+	if execErrIsBenignUserInterrupt(copyErr, opts) {
+		return nil
 	}
 	return copyErr
 }

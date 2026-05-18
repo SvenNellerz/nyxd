@@ -30,7 +30,7 @@ import (
 	"github.com/zrougamed/nyxd/internal/supervisor"
 )
 
-// mimeExecStreamV1 request body: one JSON line {"argv":[...]}\n then bytes streamed to
+// mimeExecStreamV1 request body: one JSON line {"argv":[...],"tty":true}\n then bytes streamed to
 // crun exec stdin until the client closes the body (nyx exec -i).
 const mimeExecStreamV1 = "application/x-nyxd-exec+v1"
 
@@ -211,6 +211,7 @@ func (s *Server) handleContainers(w http.ResponseWriter, r *http.Request) {
 
 type execRequest struct {
 	Argv []string `json:"argv"`
+	TTY  bool     `json:"tty,omitempty"`
 }
 
 type flushWriter struct{ http.ResponseWriter }
@@ -311,7 +312,7 @@ func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
 	if execCtx == nil {
 		execCtx = context.Background()
 	}
-	if err := s.rt.Exec(execCtx, id, body.Argv, stdin, fw, fw); err != nil {
+	if err := s.rt.Exec(execCtx, id, body.Argv, stdin, fw, fw, body.TTY); err != nil {
 		s.log.Warn("control exec", "id", id, "err", err)
 		// Headers are already 200 — still surface the failure on the exec byte stream so
 		// the client is not left with a silent empty body (common when crun fails or the

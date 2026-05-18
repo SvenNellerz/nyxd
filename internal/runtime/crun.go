@@ -14,7 +14,10 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
+
+	"github.com/creack/pty"
 )
 
 // State mirrors crun's container state output.
@@ -315,21 +318,32 @@ func (r *Runtime) exitCodeFromRawState(ctx context.Context, containerID string) 
 
 // Exec runs a one-shot process inside a running container (crun exec).
 // If stdin is non-nil, it is wired to crun's stdin (streaming).
+// If tty is true, crun is run with --tty and stdio is attached to a host PTY (github.com/creack/pty),
+// so shells and line-editing behave like docker exec -it.
 //
 // When stdin comes from a long-lived HTTP body (nyx exec -i), os/exec would otherwise
 // block forever in Wait: it waits for stdin copy to reach EOF after the child exits.
 // WaitDelay lets the runtime close stdin/stdout pipes shortly after the process exits
 // so one-shot commands like `nyx exec -it cid ls` complete while the client keeps the
 // request body open for interactive use.
-func (r *Runtime) Exec(ctx context.Context, containerID string, argv []string, stdin io.Reader, stdout, stderr io.Writer) error {
+func (r *Runtime) Exec(ctx context.Context, containerID string, argv []string, stdin io.Reader, stdout, stderr io.Writer, tty bool) error {
 	if len(argv) == 0 {
 		return fmt.Errorf("exec: empty argv")
 	}
-	args := append([]string{"--root", r.rootDir, "exec", "--", containerID}, argv...)
+	base := []string{"--root", r.rootDir, "exec"}
+	if tty {
+		base = append(base, "--tty")
+	}
+	base = append(base, "--", containerID)
+	args := append(base, argv...)
+
+	if tty {
+		return r.execTTY(ctx, args, stdin, stdout, stderr)
+	}
+
 	cmd := exec.CommandContext(ctx, r.binary, args...)
 	if stdin != nil {
 		cmd.Stdin = stdin
-		// See package comment: without this, Cmd.Wait never returns if stdin never EOFs.
 		cmd.WaitDelay = 800 * time.Millisecond
 	}
 	switch {
@@ -347,14 +361,61 @@ func (r *Runtime) Exec(ctx context.Context, containerID string, argv []string, s
 		cmd.Stderr = io.Discard
 	}
 	if err := cmd.Run(); err != nil {
-		// Process exited successfully but stdin (or another pipe) did not drain before
-		// WaitDelay; treat as success (common for streamed stdin over HTTP).
 		if stdin != nil && errors.Is(err, exec.ErrWaitDelay) {
 			if cmd.ProcessState != nil && cmd.ProcessState.Success() {
 				return nil
 			}
 		}
 		return fmt.Errorf("crun exec: %w", err)
+	}
+	return nil
+}
+
+func (r *Runtime) execTTY(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) error {
+	cmd := exec.CommandContext(ctx, r.binary, args...)
+	cmd.WaitDelay = 800 * time.Millisecond
+
+	ptyMaster, err := pty.StartWithSize(cmd, nil)
+	if err != nil {
+		return fmt.Errorf("crun exec: %w", err)
+	}
+
+	out := stdout
+	if out == nil {
+		out = io.Discard
+	}
+	if stderr != nil && stderr != out {
+		// PTY merges stderr into the tty stream; best-effort duplicate for split writers.
+		out = io.MultiWriter(out, stderr)
+	}
+
+	var wg sync.WaitGroup
+	if stdin != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, _ = io.Copy(ptyMaster, stdin)
+		}()
+	}
+
+	copyDone := make(chan struct{})
+	go func() {
+		defer close(copyDone)
+		_, _ = io.Copy(out, ptyMaster)
+	}()
+
+	waitErr := cmd.Wait()
+	_ = ptyMaster.Close()
+	<-copyDone
+	wg.Wait()
+
+	if waitErr != nil {
+		if errors.Is(waitErr, exec.ErrWaitDelay) {
+			if cmd.ProcessState != nil && cmd.ProcessState.Success() {
+				return nil
+			}
+		}
+		return fmt.Errorf("crun exec: %w", waitErr)
 	}
 	return nil
 }

@@ -23,8 +23,8 @@ type runOpts struct {
 	env      []string
 	hostname string
 	restart  string
-	publish   []string
-	printID   bool // foreground: print container id on stderr (default: off, docker-like)
+	publish  []string
+	printID  bool // foreground: print container id on stderr (default: off, docker-like)
 }
 
 func parseRunArgs(args []string) (runOpts, error) {
@@ -139,10 +139,10 @@ doneFlags:
 
 // execCLIOptions is the result of parsing `nyx exec` arguments.
 type execCLIOptions struct {
-	ID           string
-	Argv         []string
-	AttachStdin  bool
-	WantTTY      bool // accepted for docker-compat; crun TTY not wired server-side
+	ID          string
+	Argv        []string
+	AttachStdin bool
+	WantTTY     bool // -t / -it: allocate PTY (server uses crun exec --tty + host PTY bridge)
 }
 
 func parseExecArgs(args []string) (execCLIOptions, error) {
@@ -164,7 +164,7 @@ func parseExecArgs(args []string) (execCLIOptions, error) {
 		case (a == "-w" || a == "--workdir") && i+1 < len(args):
 			i += 2
 		case strings.HasPrefix(a, "-"):
-			return o, fmt.Errorf("unknown exec flag %q (only -i/-t/-w are accepted; TTY is not implemented server-side)", a)
+			return o, fmt.Errorf("unknown exec flag %q (supported: -i, -t, -it, -w/--workdir)", a)
 		default:
 			goto done
 		}

@@ -306,7 +306,8 @@ paths:
 
         Body variants:
         - `application/json` — `ExecRequest` only (stdin closed).
-        - `application/x-nyxd-exec+v1` — first line is JSON `ExecRequest` plus newline; remaining bytes stream to `crun exec` stdin (used by `nyx exec -i`).
+        - `application/x-nyxd-exec+v1` — first line is JSON `ExecRequest` (`argv`, optional `tty`);
+          remaining bytes stream to `crun exec` stdin (`nyx exec -i`).
       operationId: execInContainer
       parameters:
         - name: id
@@ -920,3 +921,6 @@ components:
           items:
             type: string
           description: argv[0] is the program to exec
+        tty:
+          type: boolean
+          description: If true, allocate a pseudo-terminal (crun exec --tty) for shells and line editing.
