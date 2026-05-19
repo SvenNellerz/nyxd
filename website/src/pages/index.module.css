@@ -1,0 +1,130 @@
+/**
+ * CSS files with the .module.css suffix will be treated as CSS modules
+ * and scoped locally.
+ */
+
+.heroBanner {
+  padding: 5rem 0 3.5rem;
+  position: relative;
+  overflow: hidden;
+  background:
+    radial-gradient(circle at 10% 20%, rgba(95, 187, 93, 0.18), transparent 42%),
+    radial-gradient(circle at 95% 8%, rgba(24, 42, 74, 0.12), transparent 36%),
+    linear-gradient(180deg, #f7fbf8 0%, #ffffff 75%);
+}
+
+.heroGrid {
+  display: grid;
+  grid-template-columns: 1.3fr 0.9fr;
+  gap: 1.6rem;
+  align-items: stretch;
+}
+
+.kicker {
+  margin-bottom: 0.4rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-size: 0.78rem;
+  color: #2a6e45;
+  font-weight: 700;
+}
+
+.heroTitle {
+  margin-bottom: 0.35rem;
+  font-size: clamp(2.3rem, 4.5vw, 3.8rem);
+  color: #152c4a;
+}
+
+.heroSubtitle {
+  max-width: 42rem;
+  margin: 0;
+  color: #324b6a;
+  font-size: 1.15rem;
+}
+
+.panel {
+  border: 1px solid #d5e6d9;
+  border-radius: 16px;
+  background: #ffffff;
+  padding: 1.1rem 1.2rem;
+  box-shadow: 0 12px 34px rgba(21, 44, 74, 0.08);
+}
+
+.panelTitle {
+  margin: 0 0 0.55rem;
+  font-size: 0.9rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: #2a6e45;
+}
+
+.panel ul {
+  margin: 0;
+  padding-left: 1.1rem;
+}
+
+.panel li {
+  margin-bottom: 0.45rem;
+  color: #243a56;
+}
+
+@media screen and (max-width: 996px) {
+  .heroBanner {
+    padding: 2.5rem 0 2rem;
+  }
+
+  .heroGrid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.buttons {
+  display: flex;
+  gap: 0.75rem;
+  align-items: center;
+  margin-top: 1.2rem;
+  flex-wrap: wrap;
+}
+
+.valueSection {
+  padding: 1.2rem 0 3.2rem;
+}
+
+.cards {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 1rem;
+}
+
+.card {
+  border: 1px solid #dce6f3;
+  border-radius: 14px;
+  padding: 1.1rem;
+  background: #ffffff;
+  box-shadow: 0 6px 22px rgba(16, 39, 70, 0.05);
+}
+
+.card h2 {
+  font-size: 1.05rem;
+  margin-bottom: 0.35rem;
+  color: #173357;
+}
+
+.card p {
+  margin: 0;
+  color: #365170;
+}
+
+.ctaRow {
+  margin-top: 1.25rem;
+  display: flex;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+@media screen and (max-width: 996px) {
+  .cards {
+    grid-template-columns: 1fr;
+  }
+}
