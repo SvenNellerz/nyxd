@@ -1,15 +1,6 @@
-<svg width="620" height="170" viewBox="0 0 620 170" fill="none" xmlns="http://www.w3.org/2000/svg">
-	<defs>
-		<style>
-			.ink { fill: #132843; }
-			.line { stroke: #5fbb5d; stroke-width: 8; stroke-linecap: round; stroke-linejoin: round; fill: none; }
-		</style>
-	</defs>
-	<path class="line" d="M80 17 26 48v62l54 31 54-31V48L80 17z"/>
-	<path class="line" d="M80 38 45 58l35 20 35-20-35-20z"/>
-	<path class="line" d="M45 58v33l35 20V78"/>
-	<path class="line" d="M115 58v33l-35 20"/>
-	<path class="ink" d="M180 48h34v74h-14V64h-20z"/>
-	<path class="ink" d="M247 48h16l17 29 17-29h16l-24 40 25 34h-16l-18-24-18 24h-16l25-34-24-40z"/>
-	<path class="ink" d="M348 48h14v100h-14v-36h-1c-4 8-13 13-24 13-22 0-36-16-36-40 0-24 14-40 36-40 11 0 20 5 24 13h1V48zm-23 65c14 0 24-11 24-28s-10-28-24-28-24 11-24 28 10 28 24 28z"/>
+<svg width="128" height="128" viewBox="0 0 128 128" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <path d="M64 12 20 37v54l44 25 44-25V37L64 12z" stroke="#5fbb5d" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M64 29 36 45l28 16 28-16-28-16z" stroke="#5fbb5d" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M36 45v27l28 16V61" stroke="#5fbb5d" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M92 45v27L64 88" stroke="#5fbb5d" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>
 </svg>

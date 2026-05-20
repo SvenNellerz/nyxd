@@ -1,6 +1,7 @@
 import {themes as prismThemes} from 'prism-react-renderer';
 import type {Config} from '@docusaurus/types';
 import type * as Preset from '@docusaurus/preset-classic';
+import type * as OpenApiPlugin from 'docusaurus-plugin-openapi-docs';
 
 // This runs in Node.js - Don't use client-side code here (browser APIs, JSX...)
 
@@ -42,6 +43,7 @@ const config: Config = {
         docs: {
           sidebarPath: './sidebars.ts',
           routeBasePath: 'docs',
+          docItemComponent: '@theme/ApiItem',
           editUrl: 'https://github.com/zrougamed/nyxd/tree/main/website/',
         },
         blog: false,
@@ -52,11 +54,33 @@ const config: Config = {
     ],
   ],
 
+  themes: ['docusaurus-theme-openapi-docs'],
+
+  plugins: [
+    [
+      'docusaurus-plugin-openapi-docs',
+      {
+        id: 'openapi',
+        docsPluginId: 'classic',
+        config: {
+          nyxd: {
+            specPath: 'static/openapi.yaml',
+            outputDir: 'docs/reference/api',
+            sidebarOptions: {
+              groupPathsBy: 'tag',
+            },
+          } satisfies OpenApiPlugin.Options,
+        },
+      },
+    ],
+  ],
+
   themeConfig: {
     image: 'img/logo.svg',
     colorMode: {
       defaultMode: 'light',
-      respectPrefersColorScheme: false,
+      disableSwitch: false,
+      respectPrefersColorScheme: true,
     },
     navbar: {
       title: 'nyxd',
@@ -71,7 +95,7 @@ const config: Config = {
           position: 'left',
           label: 'Documentation',
         },
-        {to: '/docs/reference/api-reference', label: 'API', position: 'left'},
+        {to: '/docs/reference/api/', label: 'API', position: 'left'},
         {
           href: 'https://github.com/zrougamed/nyxd',
           label: 'GitHub',

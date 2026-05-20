@@ -4,6 +4,42 @@ Legend: `[x]` shipped in tree (still may need polish), `[ ]` not done, `[~]` par
 
 ---
 
+## Architecture diagram
+
+```mermaid
+flowchart LR
+		U[User] --> C[nyx CLI]
+		C -->|HTTP over Unix socket| API[nyxd Control API]
+
+		subgraph D[nyxd Daemon]
+			API --> SUP[Supervisor]
+			API --> CMP[Compose Parser and Builder]
+			API --> IMG[Image Store and Puller]
+
+			CMP --> IMG
+			CMP --> SUP
+
+			SUP --> OVL[Overlay Manager]
+			SUP --> NET[Network Backend]
+			SUP --> BND[Bundle Generator]
+			SUP --> RT[Runtime Adapter]
+			SUP --> HLT[Health Subsystem]
+			SUP --> LOG[Log Collector]
+			SUP --> PER[Persist and Reconcile]
+			SUP --> DNS[DNS Backend]
+		end
+
+		RT --> CRUN[crun]
+		IMG --> REG[OCI Registry]
+		NET --> KRN[Linux kernel primitives]
+		NET -. optional .-> CNI[CNI plugins]
+		PER --> FS[nyxd data dir state]
+		LOG --> FS
+		IMG --> FS
+		OVL --> FS
+		BND --> FS
+```
+
 ## Already in the tree (high level)
 
 - [x] **OCI runtime shell-out** — `internal/runtime`: `crun` create/start/run (`--detach` helper), **`run` foreground** (`--pid-file` + stdio), kill/delete/state/list, **`CrunContainerAbsent`** (missing `status` / not-found) for wait/teardown, idempotent **`Delete`** when state already gone, state JSON parsing, dedicated `--root` state dir.
